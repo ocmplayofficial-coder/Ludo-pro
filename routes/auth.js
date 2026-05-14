@@ -1,20 +1,22 @@
 const router = require("express").Router();
 const jwt = require("jsonwebtoken");
+const axios = require("axios");
 const User = require("../models/User");
 const Transaction = require("../models/Transaction");
 const bcrypt = require("bcryptjs");
-const sendOtp=require("../controllers/authController");
+const authController = require("../controllers/authController");
 
 /**
  * 🔐 CONFIG
  */
-const otpStore = {};
 const JWT_SECRET = process.env.JWT_SECRET || "TRY_PLAYERS_SECURE_KEY";
 const OTP_EXPIRY = 2 * 60 * 1000;
 
 // Env variables for Admin
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@gmail.com";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "123456";
+
+// SMS provider configured in controller (APITxt)
 
 /**
  * 🧹 USER SANITIZER
@@ -87,48 +89,14 @@ router.post("/login", async (req, res) => {
 /**
  * 🔥 2. SEND OTP
  */
-router.post("/send-otp", sendOtp);
+router.post("/send-otp", authController.sendOtp);
 
 /**
  * 🔥 3. VERIFY OTP & REGISTER
  */
-router.post("/verify-otp", async (req, res) => {
-  try {
-    const { phone, otp, deviceId } = req.body;
-    const record = otpStore[phone];
+router.post("/verify-otp", authController.verifyOtp);
 
-    if (!record || record.expires < Date.now() || record.otp != otp) {
-      return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
-    }
-
-    let user = await User.findOne({ phone });
-    if (!user) {
-      user = new User({
-        phone,
-        deviceId,
-        role: "user",
-        name: `Player_${phone.slice(-4)}`,
-        wallet: { deposit: 0, winnings: 0, bonus: 0 }
-      });
-      await user.save();
-    }
-
-    user.isOnline = true;
-    user.lastLogin = new Date();
-    await user.save();
-
-    const token = jwt.sign(
-      { id: user._id, _id: user._id, role: "user" },
-      JWT_SECRET,
-      { expiresIn: "7d" }
-    );
-
-    delete otpStore[phone];
-    res.json({ success: true, token, user: sanitizeUser(user) });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Verification failed" });
-  }
-});
+// Firebase phone login removed. Use /send-otp and /verify-otp endpoints instead.
 
 /**
  * 🛡️ INTERNAL AUTH MIDDLEWARE

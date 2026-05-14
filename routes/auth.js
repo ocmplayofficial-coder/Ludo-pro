@@ -3,6 +3,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/User");
 const Transaction = require("../models/Transaction");
 const bcrypt = require("bcryptjs");
+const sendOtp=require("../controllers/authController");
 
 /**
  * 🔐 CONFIG
@@ -86,22 +87,7 @@ router.post("/login", async (req, res) => {
 /**
  * 🔥 2. SEND OTP
  */
-router.post("/send-otp", async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone || !/^[0-9]{10}$/.test(phone)) {
-      return res.status(400).json({ success: false, message: "Invalid 10-digit number" });
-    }
-
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
-
-    otpStore[phone] = { otp, expires: Date.now() + OTP_EXPIRY };
-    console.log(`📩 [OTP_SENT] ${phone} -> ${otp}`);
-    res.json({ success: true, message: "OTP sent successfully" });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Failed to send OTP" });
-  }
-});
+router.post("/send-otp", sendOtp);
 
 /**
  * 🔥 3. VERIFY OTP & REGISTER

@@ -68,17 +68,12 @@ const sendOtp = async (req, res) => {
 
       const response = await axios.post(
         "https://apitxt.com/api/sendOTP",
-        null,
         {
-          params: {
             authkey: APITXT_API_KEY,
             mobile: `91${cleaned}`,
             otp: otp,
             sender: APITXT_SENDER_ID,
-          },
-
-          timeout: 15000,
-        }
+        },
       );
 
       // ===============================

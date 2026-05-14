@@ -44,7 +44,7 @@ const sendOtp = async (req, res) => {
     // APITXT REQUEST
     try {
       const response = await axios.get(
-        "https://www.apitxt.com/api/sendOTP",
+        "https://apitxt.com/api/sendOTP",
         {
           params: {
             authkey: APITXT_API_KEY,

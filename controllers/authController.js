@@ -38,7 +38,7 @@ const sendOtp = async (req, res) => {
     });
 
     console.log(
-      `[OTP STORED] ${cleaned} => ${otp} (expires ${OTP_EXPIRY}s)`
+      `[OTP STORED] ${cleaned} => ${otp}`
     );
 
     // ===============================
@@ -54,22 +54,21 @@ const sendOtp = async (req, res) => {
     }
 
     // ===============================
-    // SEND OTP USING APITXT
+    // APITXT REQUEST
     // ===============================
     try {
       console.log("========== APITXT REQUEST ==========");
 
       console.log({
-        authkey: APITXT_API_KEY,
         mobile: `91${cleaned}`,
-        otp: otp,
         sender: APITXT_SENDER_ID,
       });
 
-      console.log("====================================");
+      console.log("===================================");
 
-      const response = await axios.get(
+      const response = await axios.post(
         "https://apitxt.com/api/sendOTP",
+        null,
         {
           params: {
             authkey: APITXT_API_KEY,
@@ -83,35 +82,33 @@ const sendOtp = async (req, res) => {
       );
 
       // ===============================
-      // RESPONSE LOG
+      // RESPONSE
       // ===============================
       console.log("========== APITXT RESPONSE ==========");
 
       console.log(response.data);
 
-      console.log("=====================================");
-
-      const responseText = JSON.stringify(
-        response.data
-      ).toLowerCase();
+      console.log("====================================");
 
       // ===============================
       // SUCCESS CHECK
       // ===============================
       if (
-        responseText.includes("success") ||
-        responseText.includes("sent") ||
-        responseText.includes("otp")
+        response.data &&
+        (
+          response.data.status === "success" ||
+          response.data.success === true
+        )
       ) {
         console.log(
-          `✅ OTP SENT SUCCESSFULLY TO ${cleaned}`
+          `✅ OTP SENT TO ${cleaned}`
         );
 
         return res.status(200).json({
           success: true,
           message: "OTP sent successfully",
 
-          // testing only
+          // local testing only
           otp: isProd ? undefined : otp,
         });
       }
@@ -128,9 +125,6 @@ const sendOtp = async (req, res) => {
         success: false,
         message: "OTP provider failed",
         providerResponse: response.data,
-
-        // testing fallback
-        otp: isProd ? undefined : otp,
       });
     } catch (error) {
       // ===============================
@@ -154,9 +148,6 @@ const sendOtp = async (req, res) => {
           error.response?.data ||
           error.message ||
           "Unknown SMS Error",
-
-        // testing fallback
-        otp: isProd ? undefined : otp,
       });
     }
   } catch (err) {

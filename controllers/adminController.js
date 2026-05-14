@@ -502,7 +502,6 @@ exports.updateTransaction = async (req, res) => {
     Object.assign(transaction, updates);
     transaction.metadata = transaction.metadata || {};
     transaction.metadata.adminNote = `Updated by admin on ${new Date().toISOString()}`;
-
     await transaction.save();
 
     res.json({ success: true, transaction });
@@ -523,17 +522,83 @@ exports.approveAdminTransaction = async (req, res) => {
       return res.status(404).json({ success: false, message: "Transaction not found" });
     }
 
-    if (transaction.status !== "pending") {
+    // Prevent double-processing
+    if (transaction.status === "success") {
+      console.log("approveAdminTransaction: transaction already success, skipping wallet update", transaction._id);
       return res.status(400).json({ success: false, message: "Transaction already processed" });
+    }
+
+    // Determine approved amount (allow admin to pass override in body)
+    const approvedAmount = Number(req.body.amount || transaction.amount || 0);
+
+    // Basic validation
+    if (!approvedAmount || approvedAmount <= 0) {
+      return res.status(400).json({ success: false, message: "Valid approved amount is required" });
+    }
+
+    // Only credit user for deposit transactions
+    let updatedUser = null;
+    if (transaction.type === "deposit") {
+      const user = await User.findById(transaction.userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "Associated user not found" });
+      }
+
+      console.log("approveAdminTransaction: crediting user", user._id.toString(), "amount", approvedAmount);
+
+      // Atomically increment deposit wallet
+      updatedUser = await User.findByIdAndUpdate(
+        user._id,
+        { $inc: { "wallet.deposit": approvedAmount } },
+        { new: true }
+      );
+
+      // Recalculate top-level balance and persist
+      try {
+        const newBalance = (updatedUser.wallet.deposit || 0) + (updatedUser.wallet.winnings || 0) + (updatedUser.wallet.bonus || 0);
+        updatedUser.balance = newBalance;
+        await updatedUser.save();
+      } catch (syncErr) {
+        console.warn("approveAdminTransaction: failed to sync top-level balance:", syncErr);
+      }
+
+      // Update transaction bookkeeping
+      transaction.balanceAfter = (transaction.balanceBefore || 0) + approvedAmount;
+      transaction.amount = approvedAmount;
+    } else if (transaction.type === "withdraw") {
+      // For withdraw approvals, assume withdrawal was already deducted when request created
+      transaction.balanceAfter = transaction.balanceAfter || (transaction.balanceBefore - (Number(transaction.amount) || 0));
+    } else {
+      transaction.balanceAfter = transaction.balanceAfter || transaction.balanceBefore;
     }
 
     transaction.status = "success";
     transaction.metadata = transaction.metadata || {};
     transaction.metadata.adminNote = `Approved by admin on ${new Date().toISOString()}`;
+    transaction.processedAt = transaction.processedAt || new Date();
 
     await transaction.save();
 
-    res.json({ success: true, message: "Transaction approved successfully", transaction });
+    // Emit real-time update to user room(s)
+    try {
+      const ludoIo = req.app.get("ludoIo");
+      const tpIo = req.app.get("tpIo");
+      const payload = {
+        userId: updatedUser ? updatedUser._id : transaction.userId,
+        amount: approvedAmount,
+        balance: updatedUser ? ((updatedUser.wallet.deposit || 0) + (updatedUser.wallet.winnings || 0) + (updatedUser.wallet.bonus || 0)) : undefined,
+        type: transaction.type || 'deposit'
+      };
+
+      if (ludoIo) ludoIo.to(String(payload.userId)).emit("walletUpdated", payload);
+      if (tpIo) tpIo.to(String(payload.userId)).emit("walletUpdated", payload);
+
+      console.log("approveAdminTransaction: emitted walletUpdated", payload);
+    } catch (emitErr) {
+      console.warn("approveAdminTransaction: failed to emit walletUpdated:", emitErr);
+    }
+
+    return res.json({ success: true, message: "Transaction approved successfully", transaction, balance: updatedUser ? updatedUser.balance : undefined });
   } catch (err) {
     console.error("Approve admin transaction error:", err);
     res.status(500).json({ success: false, message: "Failed to approve transaction" });
@@ -676,9 +741,16 @@ exports.approveTransaction = async (req, res) => {
         return res.status(404).json({ success: false, message: "User not found" });
       }
 
+      // Credit the user's deposit wallet and keep top-level balance in sync
       await User.findByIdAndUpdate(deposit.userId, {
         $inc: { "wallet.deposit": amountToCredit }
       });
+
+      const updatedUser = await User.findById(deposit.userId);
+      const newBalance = (updatedUser.wallet.deposit || 0) + (updatedUser.wallet.winnings || 0) + (updatedUser.wallet.bonus || 0);
+      // keep legacy/top-level balance field in sync
+      updatedUser.balance = newBalance;
+      await updatedUser.save();
 
       deposit.status = 'approved';
       deposit.amount = amountToCredit;
@@ -700,7 +772,18 @@ exports.approveTransaction = async (req, res) => {
         await pendingTransaction.save();
       }
 
-      return res.json({ success: true, message: "Deposit Approved with Correct Amount!" });
+      // Emit socket update
+      try {
+        const ludoIo = req.app.get("ludoIo");
+        const tpIo = req.app.get("tpIo");
+        const payload = { userId: updatedUser._id, amount: amountToCredit, balance: newBalance, type: 'deposit' };
+        if (ludoIo) ludoIo.to(updatedUser._id.toString()).emit("walletUpdated", payload);
+        if (tpIo) tpIo.to(updatedUser._id.toString()).emit("walletUpdated", payload);
+      } catch (emitErr) {
+        console.warn("Failed to emit walletUpdated after deposit approve:", emitErr);
+      }
+
+      return res.json({ success: true, message: "Deposit Approved with Correct Amount!", balance: newBalance });
     }
 
     const transaction = await Transaction.findOne({ transactionId: lookupId });
@@ -723,18 +806,34 @@ exports.approveTransaction = async (req, res) => {
         return res.status(404).json({ success: false, message: "User not found" });
       }
 
-      await User.findByIdAndUpdate(transaction.userId, {
-        $inc: { "wallet.deposit": amountToCredit }
-      });
+      // Credit deposit
+      await User.findByIdAndUpdate(transaction.userId, { $inc: { "wallet.deposit": amountToCredit } });
+
+      // Sync top-level balance and fetch updated user
+      const updatedUser = await User.findById(transaction.userId);
+      const newBalance = (updatedUser.wallet.deposit || 0) + (updatedUser.wallet.winnings || 0) + (updatedUser.wallet.bonus || 0);
+      updatedUser.balance = newBalance;
+      await updatedUser.save();
 
       transaction.status = 'success';
       transaction.amount = amountToCredit;
-      transaction.balanceAfter = transaction.balanceBefore + amountToCredit;
+      transaction.balanceAfter = (transaction.balanceBefore || 0) + amountToCredit;
       transaction.metadata = transaction.metadata || {};
       transaction.metadata.adminNote = `Deposit approved by admin on ${new Date().toISOString()}`;
       await transaction.save();
 
-      return res.json({ success: true, message: "Deposit approved successfully!" });
+      // Emit socket update
+      try {
+        const ludoIo = req.app.get("ludoIo");
+        const tpIo = req.app.get("tpIo");
+        const payload = { userId: updatedUser._id, amount: amountToCredit, balance: newBalance, type: 'deposit' };
+        if (ludoIo) ludoIo.to(updatedUser._id.toString()).emit("walletUpdated", payload);
+        if (tpIo) tpIo.to(updatedUser._id.toString()).emit("walletUpdated", payload);
+      } catch (emitErr) {
+        console.warn("Failed to emit walletUpdated after transaction approve:", emitErr);
+      }
+
+      return res.json({ success: true, message: "Deposit approved successfully!", balance: newBalance });
     }
 
     return res.status(400).json({ success: false, message: "Unsupported transaction type for approval" });

@@ -4,6 +4,9 @@ const sendOtp = async (req, res) => {
 
     console.log("[PHONE INPUT]", rawPhone);
 
+    // ===============================
+    // NORMALIZE PHONE
+    // ===============================
     const cleaned = normalizeIndianPhone(rawPhone);
 
     console.log("[NORMALIZED PHONE]", cleaned);
@@ -16,12 +19,19 @@ const sendOtp = async (req, res) => {
       });
     }
 
-    // Generate OTP
-    const otp = Math.floor(1000 + Math.random() * 9000).toString();
+    // ===============================
+    // GENERATE OTP
+    // ===============================
+    const otp = Math.floor(
+      1000 + Math.random() * 9000
+    ).toString();
 
-    const expiresAt = Date.now() + OTP_EXPIRY * 1000;
+    const expiresAt =
+      Date.now() + OTP_EXPIRY * 1000;
 
-    // Save OTP
+    // ===============================
+    // STORE OTP
+    // ===============================
     OTP_MAP.set(cleaned, {
       otp,
       expiresAt,
@@ -31,7 +41,9 @@ const sendOtp = async (req, res) => {
       `[OTP STORED] ${cleaned} => ${otp} (expires ${OTP_EXPIRY}s)`
     );
 
-    // Check API key
+    // ===============================
+    // CHECK API KEY
+    // ===============================
     if (!APITXT_API_KEY) {
       console.log("❌ APITXT API KEY MISSING");
 
@@ -41,8 +53,21 @@ const sendOtp = async (req, res) => {
       });
     }
 
-    // APITXT REQUEST
+    // ===============================
+    // SEND OTP USING APITXT
+    // ===============================
     try {
+      console.log("========== APITXT REQUEST ==========");
+
+      console.log({
+        authkey: APITXT_API_KEY,
+        mobile: `91${cleaned}`,
+        otp: otp,
+        sender: APITXT_SENDER_ID,
+      });
+
+      console.log("====================================");
+
       const response = await axios.get(
         "https://apitxt.com/api/sendOTP",
         {
@@ -50,52 +75,75 @@ const sendOtp = async (req, res) => {
             authkey: APITXT_API_KEY,
             mobile: `91${cleaned}`,
             otp: otp,
+            sender: APITXT_SENDER_ID,
           },
 
           timeout: 15000,
         }
       );
 
+      // ===============================
+      // RESPONSE LOG
+      // ===============================
       console.log("========== APITXT RESPONSE ==========");
+
       console.log(response.data);
-      console.log("====================================");
+
+      console.log("=====================================");
 
       const responseText = JSON.stringify(
         response.data
       ).toLowerCase();
 
+      // ===============================
       // SUCCESS CHECK
+      // ===============================
       if (
         responseText.includes("success") ||
         responseText.includes("sent") ||
         responseText.includes("otp")
       ) {
-        console.log(`✅ OTP SENT TO ${cleaned}`);
+        console.log(
+          `✅ OTP SENT SUCCESSFULLY TO ${cleaned}`
+        );
 
         return res.status(200).json({
           success: true,
           message: "OTP sent successfully",
 
-          // For testing only
+          // testing only
           otp: isProd ? undefined : otp,
         });
       }
 
-      console.log("❌ APITXT FAILED:", response.data);
+      // ===============================
+      // PROVIDER FAILED
+      // ===============================
+      console.log(
+        "❌ APITXT FAILED:",
+        response.data
+      );
 
       return res.status(500).json({
         success: false,
         message: "OTP provider failed",
         providerResponse: response.data,
 
-        // Testing fallback
+        // testing fallback
         otp: isProd ? undefined : otp,
       });
     } catch (error) {
+      // ===============================
+      // API ERROR
+      // ===============================
       console.log("========== APITXT ERROR ==========");
+
       console.log(
-        error.response?.data || error.message
+        error.response?.data ||
+          error.message ||
+          error
       );
+
       console.log("==================================");
 
       return res.status(500).json({
@@ -107,12 +155,18 @@ const sendOtp = async (req, res) => {
           error.message ||
           "Unknown SMS Error",
 
-        // Testing fallback
+        // testing fallback
         otp: isProd ? undefined : otp,
       });
     }
   } catch (err) {
-    console.log("[SEND OTP ERROR]", err.message);
+    // ===============================
+    // INTERNAL ERROR
+    // ===============================
+    console.log(
+      "[SEND OTP ERROR]",
+      err.message
+    );
 
     return res.status(500).json({
       success: false,

@@ -6,6 +6,9 @@ const Deposit = require("../models/Deposit"); // Manual payment proof ke liye
 const PaymentMethod = require("../models/PaymentMethod");
 const auth = require("../middleware/authMiddleware");
 
+// Minimum deposit value (configurable via environment variable)
+const MIN_DEPOSIT = Number(process.env.MIN_DEPOSIT) || 2;
+
 /**
  * 💰 1. GET WALLET DETAILS
  */
@@ -14,10 +17,12 @@ router.get("/", auth, async (req, res) => {
     const user = await User.findById(req.user.id).select("wallet");
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
+    const computed = (user.wallet.deposit || 0) + (user.wallet.winnings || 0) + (user.wallet.bonus || 0);
+    const balance = typeof user.balance === 'number' ? user.balance : computed;
+
     res.json({
       success: true,
-      // Total calculated balance
-      balance: (user.wallet.deposit || 0) + (user.wallet.winnings || 0) + (user.wallet.bonus || 0), 
+      balance,
       deposit: user.wallet.deposit || 0,
       winning: user.wallet.winnings || 0,
       bonus: user.wallet.bonus || 0
@@ -35,8 +40,8 @@ router.post("/deposit", auth, async (req, res) => {
     const { amount, paymentId } = req.body;
     const numAmount = Number(amount);
 
-    if (!numAmount || numAmount < 10) {
-      return res.status(400).json({ success: false, message: "Minimum deposit is ₹10" });
+    if (!numAmount || numAmount < MIN_DEPOSIT) {
+      return res.status(400).json({ success: false, message: `Minimum deposit is ₹${MIN_DEPOSIT}` });
     }
 
     const user = await User.findById(req.user.id);
@@ -151,6 +156,7 @@ const getRotatedMethod = async (req, res) => {
       upiId: upiMethod ? upiMethod.upiId : "",
       qrUrl: qrMethod ? qrMethod.qrImageUrl : null,
       qrImageUrl: qrMethod ? qrMethod.qrImageUrl : null,
+      minimumDeposit: MIN_DEPOSIT
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -168,8 +174,8 @@ router.post("/create-deposit", auth, async (req, res) => {
     const { amount, transactionId } = req.body;
     const numAmount = Number(amount);
 
-    if (!numAmount || numAmount < 10) {
-      return res.status(400).json({ success: false, message: "Minimum deposit is ₹10" });
+    if (!numAmount || numAmount < MIN_DEPOSIT) {
+      return res.status(400).json({ success: false, message: `Minimum deposit is ₹${MIN_DEPOSIT}` });
     }
 
     if (!transactionId || transactionId.trim().length < 12) {

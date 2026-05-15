@@ -40,6 +40,8 @@ const userSchema = new mongoose.Schema({
     winnings: { type: Number, default: 0, min: 0 },
     bonus: { type: Number, default: 0, min: 0 }
   },
+  // Legacy / convenience total balance field (kept in sync with wallet.*)
+  balance: { type: Number, default: 0, min: 0 },
 
   // 📈 GAME STATISTICS (Ludo + Teen Patti)
   stats: {

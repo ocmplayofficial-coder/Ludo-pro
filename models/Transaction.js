@@ -120,10 +120,16 @@ transactionSchema.pre("save", function (next) {
 
 // 2. 🛡️ INTEGRITY CHECK
 transactionSchema.pre("validate", function (next) {
+  // Normalize paymentMethod to schema-friendly lowercase values to avoid enum validation errors
+  if (this.paymentMethod && typeof this.paymentMethod === 'string') {
+    this.paymentMethod = this.paymentMethod.toLowerCase().replace(/\s+/g, '_');
+  }
+
   // Deposit ya winning ke waqt balance negative nahi ho sakta
   if (this.balanceAfter < 0) {
     return next(new Error("⚠️ Integrity Error: Negative wallet balance detected."));
   }
+
   next();
 });
 

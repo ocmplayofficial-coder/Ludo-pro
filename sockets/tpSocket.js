@@ -7,14 +7,19 @@ const Match = require("../models/Match");
 let tpWaitingPlayers = [];
 const TURN_TIME_LIMIT = 20000; // 20 Seconds per turn
 
+// Ensure global trackers exist (may be initialized by game socket)
+global.ONLINE_USERS = global.ONLINE_USERS || new Map();
+global.LUDO_ONLINE = global.LUDO_ONLINE || new Set();
+global.TP_ONLINE = global.TP_ONLINE || new Set();
+
 /**
  * 🔐 SOCKET AUTH (Same as Ludo for consistency)
  */
 const authenticateSocket = async (socket, next) => {
   try {
-    console.log("TP SOCKET AUTH PAYLOAD:", socket.handshake.auth);
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token || socket.handshake.headers?.authorization?.split(" ")[1];
-    console.log("TP SOCKET TOKEN BACKEND:", token);
+    if (process.env.NODE_ENV !== 'production') console.log("TP SOCKET AUTH PAYLOAD:", socket.handshake.auth);
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token || (socket.handshake.headers?.authorization || "").split(" ")[1];
+    if (process.env.NODE_ENV !== 'production') console.log("TP SOCKET TOKEN BACKEND:", token);
     if (!token) return next(new Error("No token"));
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.id);
@@ -23,7 +28,7 @@ const authenticateSocket = async (socket, next) => {
     socket.user = user;
     next();
   } catch (err) {
-    console.error("TP socket auth error:", err.message);
+    if (process.env.NODE_ENV !== 'production') console.error("TP socket auth error:", err.message);
     next(new Error("Auth failed"));
   }
 };
@@ -33,15 +38,27 @@ module.exports = (tpNamespace) => {
   tpNamespace.use(authenticateSocket);
 
   tpNamespace.on("connection", (socket) => {
-    console.log("🃏 TP Connected:", socket.userId);
+    if (process.env.NODE_ENV !== 'production') console.log("🃏 TP Connected:", socket.userId);
     socket.join(socket.userId);
 
-    // 📊 Update Admin Dashboard
-    const updateStats = () => {
-      tpNamespace.emit("adminUpdate", {
-        onlinePlayers: Object.keys(global.ACTIVE_PLAYERS || {}).length,
-        activeGames: Object.keys(global.ACTIVE_GAMES || {}).length
-      });
+    // Track socket globally
+    const userSockets = global.ONLINE_USERS.get(socket.userId) || new Set();
+    userSockets.add(socket.id);
+    global.ONLINE_USERS.set(socket.userId, userSockets);
+    global.TP_ONLINE.add(socket.userId);
+
+    // 📊 Update Admin Dashboard & lobby counts
+    const updateStats = async () => {
+      try {
+        const stats = {
+          total: global.ONLINE_USERS.size,
+          ludo: global.LUDO_ONLINE.size,
+          teenPatti: global.TP_ONLINE.size,
+          activeGames: Object.keys(global.ACTIVE_GAMES || {}).length
+        };
+        tpNamespace.server && tpNamespace.server.emit && tpNamespace.server.emit("onlinePlayers", stats);
+        tpNamespace.emit("adminUpdate", { onlinePlayers: stats.total, activeGames: stats.activeGames });
+      } catch (err) { console.error("TP updateStats error:", err); }
     };
 
     socket.on("joinGame", (gameData) => {
@@ -138,7 +155,20 @@ module.exports = (tpNamespace) => {
         if (oppSocket) oppSocket.join(roomId);
 
         tpNamespace.to(roomId).emit("tp_matchFound", { roomId, prize });
-        
+
+        // Notify lobby about new TP room
+        tpNamespace.server && tpNamespace.server.emit && tpNamespace.server.emit("roomCreated", {
+          roomId,
+          players: newGame.players,
+          mode,
+          entryFee
+        });
+        tpNamespace.server && tpNamespace.server.emit && tpNamespace.server.emit("playerJoined", {
+          roomId,
+          userId: socket.userId,
+          players: newGame.players
+        });
+
         setTimeout(() => {
           tpNamespace.to(roomId).emit("tp_gameState", newGame);
           updateStats();
@@ -240,6 +270,37 @@ module.exports = (tpNamespace) => {
     socket.on("disconnect", () => {
       tpWaitingPlayers = tpWaitingPlayers.filter(p => p.socketId !== socket.id);
       console.log("🔴 TP Disconnected:", socket.userId || socket.id);
+
+      // Remove from global tracker
+      try {
+        const userSockets = global.ONLINE_USERS.get(socket.userId);
+        if (userSockets) {
+          userSockets.delete(socket.id);
+          if (userSockets.size === 0) {
+            global.ONLINE_USERS.delete(socket.userId);
+            global.TP_ONLINE.delete(socket.userId);
+            // If user has no sockets left, also ensure removed from LUDO if present
+            global.LUDO_ONLINE.delete(socket.userId);
+          } else {
+            global.ONLINE_USERS.set(socket.userId, userSockets);
+          }
+        }
+      } catch (err) { console.error("TP disconnect cleanup error:", err); }
+
+      // Broadcast updated counts
+      try { if (tpNamespace.server && tpNamespace.server.emit) tpNamespace.server.emit("onlinePlayers", {
+        total: global.ONLINE_USERS.size,
+        ludo: global.LUDO_ONLINE.size,
+        teenPatti: global.TP_ONLINE.size
+      }); } catch (e) {}
+    });
+
+    // Relay client-side reconnect events to lobby
+    socket.on('reconnecting', () => {
+      try { tpNamespace.server && tpNamespace.server.emit && tpNamespace.server.emit('reconnecting', { userId: socket.userId }); } catch (e) {}
+    });
+    socket.on('reconnectSuccess', () => {
+      try { tpNamespace.server && tpNamespace.server.emit && tpNamespace.server.emit('reconnectSuccess', { userId: socket.userId }); } catch (e) {}
     });
   });
 };

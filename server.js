@@ -99,6 +99,14 @@ app.use(
 
 app.options("*", cors());
 
+// Compression for faster responses (gzip/brotli handled by reverse proxy or plugin)
+try {
+  const compression = require('compression');
+  app.use(compression());
+} catch (e) {
+  console.warn('compression middleware not available:', e.message);
+}
+
 // ===============================
 // BODY PARSER
 // ===============================
@@ -118,6 +126,13 @@ if (!fs.existsSync(qrDir)) {
 }
 
 app.use("/uploads", express.static(uploadDir));
+// Cache static uploads for short time; let CDN or proxy handle long-term caching
+app.use((req, res, next) => {
+  if (req.path.startsWith('/uploads')) {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+  }
+  next();
+});
 
 // ===============================
 // DATABASE
@@ -193,6 +208,9 @@ const io = new Server(server, {
     origin: "*",
     credentials: true,
   },
+  // tune ping/pong for mobile reliability
+  pingInterval: 25000,
+  pingTimeout: 60000,
 });
 
 const ludoNamespace = io.of("/ludo");
@@ -250,13 +268,8 @@ app.use((req, res) => {
 // START SERVER
 // ===============================
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `🚀 Server running on http://0.0.0.0:${PORT}`
-  );
-
-  console.log(
-    `🌍 NODE_ENV=${
-      process.env.NODE_ENV || "development"
-    }`
-  );
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`🚀 Server running on http://0.0.0.0:${PORT}`);
+    console.log(`🌍 NODE_ENV=${process.env.NODE_ENV || "development"}`);
+  }
 });

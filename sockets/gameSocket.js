@@ -9,6 +9,11 @@ const activeTurnTimers = {};
 const missedTurnCounts = {};
 let waitingPlayers = [];
 const onlinePlayers = new Set();
+
+// Global online tracking across namespaces
+global.ONLINE_USERS = global.ONLINE_USERS || new Map(); // userId -> Set<socketId>
+global.LUDO_ONLINE = global.LUDO_ONLINE || new Set(); // userIds in ludo namespace
+global.TP_ONLINE = global.TP_ONLINE || new Set(); // userIds in teen patti namespace (shared)
 const RECONNECT_TIMEOUT = 30000; // 30 seconds before auto-win if player does not return
 const CLASSIC_TURN_DURATION = 30; // 30 seconds per classic turn
 const TIME_MODE_DURATION = 5 * 60 * 1000; // 5 minutes for time mode
@@ -23,6 +28,9 @@ const OPPOSITE_COLOR = {
 const isAllowedColor = (color) => ["red", "green", "blue", "yellow"].includes(color);
 const getOppositeColor = (color) => OPPOSITE_COLOR[color] || "blue";
 const normalizeColor = (color) => String(color || "").toLowerCase();
+const dbg = (...args) => {
+  if (process.env.NODE_ENV !== 'production') console.log(...args);
+};
 
 
 /**
@@ -30,9 +38,9 @@ const normalizeColor = (color) => String(color || "").toLowerCase();
  */
 const authenticateSocket = async (socket, next) => {
   try {
-    console.log("SOCKET AUTH PAYLOAD:", socket.handshake.auth);
-    const token = socket.handshake.auth?.token || socket.handshake.query?.token || socket.handshake.headers?.authorization?.split(" ")[1];
-    console.log("SOCKET TOKEN BACKEND:", token);
+    dbg("SOCKET AUTH PAYLOAD:", socket.handshake.auth);
+    const token = socket.handshake.auth?.token || socket.handshake.query?.token || (socket.handshake.headers?.authorization || "").split(" ")[1];
+    dbg("SOCKET TOKEN BACKEND:", token);
     if (!token) return next(new Error("Authentication failed: No token"));
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -54,22 +62,34 @@ module.exports = (gameNamespace) => {
   gameNamespace.use(authenticateSocket);
 
   gameNamespace.on("connection", (socket) => {
-    console.log(`🟢 Game Socket Connected: ${socket.userId}`);
+    dbg(`🟢 Game Socket Connected: ${socket.userId}`);
     socket.join(socket.userId);
 
+    // Track this socket in global map
     onlinePlayers.add(socket.id);
+    const userSockets = global.ONLINE_USERS.get(socket.userId) || new Set();
+    userSockets.add(socket.id);
+    global.ONLINE_USERS.set(socket.userId, userSockets);
+    global.LUDO_ONLINE.add(socket.userId);
 
     const updateStats = async () => {
       try {
         const liveGames = await Game.countDocuments({ status: "playing" });
-        const stats = { online: onlinePlayers.size, liveGames };
-        gameNamespace.emit("UPDATE_STATS", stats);
+        const stats = {
+          total: global.ONLINE_USERS.size,
+          ludo: global.LUDO_ONLINE.size,
+          teenPatti: (global.TP_ONLINE && global.TP_ONLINE.size) || 0,
+          liveGames
+        };
+
+        // Emit structured online players object for frontend
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("onlinePlayers", stats);
+        gameNamespace.emit("UPDATE_STATS", { online: stats.total, liveGames: stats.liveGames });
         gameNamespace.emit("lobby_stats_update", {
-          onlinePlayers: stats.online,
+          onlinePlayers: stats.total,
           activeGames: stats.liveGames,
         });
-        gameNamespace.emit("onlinePlayers", stats.online);
-        gameNamespace.emit("UPDATE_ONLINE_COUNT", { count: stats.online });
+        gameNamespace.emit("UPDATE_ONLINE_COUNT", { count: stats.total });
       } catch (err) {
         console.error("Stats update error:", err);
       }
@@ -78,7 +98,7 @@ module.exports = (gameNamespace) => {
     updateStats();
 
     socket.on("GET_ONLINE_COUNT", () => {
-      socket.emit("UPDATE_ONLINE_COUNT", { count: onlinePlayers.size });
+      socket.emit("UPDATE_ONLINE_COUNT", { count: global.ONLINE_USERS.size });
     });
 
     socket.on("JOIN_TOURNAMENT_ROOM", ({ tournamentId }) => {
@@ -462,6 +482,14 @@ module.exports = (gameNamespace) => {
         }
 
         // 8. 🏁 EMIT EVENTS
+        // Notify lobby about new room and players
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("roomCreated", {
+          roomId,
+          players: activeGames[roomId].players,
+          mode: activeGames[roomId].type,
+          entryFee: fee
+        });
+        // Notify room participants
         gameNamespace.to(roomId).emit("matchFound", { roomId });
         gameNamespace.to(roomId).emit("GAME_STARTING", {
           success: true,
@@ -473,6 +501,12 @@ module.exports = (gameNamespace) => {
           success: true,
           roomId,
           mode: gameRecord.mode
+        });
+        // Also emit playerJoined for lobby visibility
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("playerJoined", {
+          roomId,
+          userId: socket.userId,
+          players: activeGames[roomId].players
         });
         updateStats();
 
@@ -500,6 +534,18 @@ module.exports = (gameNamespace) => {
     socket.on("cancelMatchmaking", () => {
       waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
       socket.emit("matchmakingError", { message: "Matchmaking cancelled." });
+    });
+
+    // Relay reconnecting/reconnect events from client to lobby
+    socket.on('reconnecting', () => {
+      try {
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit('reconnecting', { userId: socket.userId });
+      } catch (e) { console.warn('reconnecting relay error', e); }
+    });
+    socket.on('reconnectSuccess', () => {
+      try {
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit('reconnectSuccess', { userId: socket.userId });
+      } catch (e) { console.warn('reconnectSuccess relay error', e); }
     });
 
     /**

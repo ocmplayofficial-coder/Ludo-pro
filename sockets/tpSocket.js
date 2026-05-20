@@ -267,9 +267,9 @@ module.exports = (tpNamespace) => {
       }
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", (reason) => {
       tpWaitingPlayers = tpWaitingPlayers.filter(p => p.socketId !== socket.id);
-      console.log("🔴 TP Disconnected:", socket.userId || socket.id);
+      console.log("🔴 TP Disconnected:", socket.userId || socket.id, "reason:", reason);
 
       // Remove from global tracker
       try {

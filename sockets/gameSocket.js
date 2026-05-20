@@ -11,13 +11,14 @@ const missedTurnCounts = {};
 let waitingPlayers = [];
 const onlinePlayers = new Set();
 
-global.ONLINE_USERS = global.ONLINE_USERS || new Map(); 
-global.LUDO_ONLINE = global.LUDO_ONLINE || new Set(); 
-global.TP_ONLINE = global.TP_ONLINE || new Set(); 
-const RECONNECT_TIMEOUT = 30000; 
-const CLASSIC_TURN_DURATION = 30; 
-const QUICK_TURN_DURATION = 6; // 6 Seconds authoritative circular loop countdown
-const TIME_MODE_DURATION = 5 * 60 * 1000; 
+// Global online tracking across namespaces
+global.ONLINE_USERS = global.ONLINE_USERS || new Map(); // userId -> Set<socketId>
+global.LUDO_ONLINE = global.LUDO_ONLINE || new Set(); // userIds in ludo namespace
+global.TP_ONLINE = global.TP_ONLINE || new Set(); // userIds in teen patti namespace (shared)
+const RECONNECT_TIMEOUT = 30000; // 30 seconds before auto-win if player does not return
+const CLASSIC_TURN_DURATION = 30; // 30 seconds per classic turn
+const QUICK_TURN_DURATION = 6; // 6 seconds quick authoritative turn
+const TIME_MODE_DURATION = 5 * 60 * 1000; // 5 minutes for time mode
 
 const OPPOSITE_COLOR = {
   red: "yellow",
@@ -32,6 +33,7 @@ const normalizeColor = (color) => String(color || "").toLowerCase();
 const dbg = (...args) => {
   if (process.env.NODE_ENV !== 'production') console.log(...args);
 };
+
 
 /**
  * 🔐 SOCKET AUTHENTICATION
@@ -56,6 +58,7 @@ const authenticateSocket = async (socket, next) => {
   }
 };
 
+
 module.exports = (gameNamespace) => {
   gameNamespace.use(authenticateSocket);
 
@@ -63,6 +66,7 @@ module.exports = (gameNamespace) => {
     dbg(`🟢 Game Socket Connected: ${socket.userId}`);
     socket.join(socket.userId);
 
+    // Track this socket in global map
     onlinePlayers.add(socket.id);
     const userSockets = global.ONLINE_USERS.get(socket.userId) || new Set();
     userSockets.add(socket.id);
@@ -79,6 +83,7 @@ module.exports = (gameNamespace) => {
           liveGames
         };
 
+        // Emit structured online players object for frontend
         gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("onlinePlayers", stats);
         gameNamespace.emit("UPDATE_STATS", { online: stats.total, liveGames: stats.liveGames });
         gameNamespace.emit("lobby_stats_update", {
@@ -97,7 +102,548 @@ module.exports = (gameNamespace) => {
       socket.emit("UPDATE_ONLINE_COUNT", { count: global.ONLINE_USERS.size });
     });
 
-    // --- 🎮 JOIN REAL-TIME AUTH ROOM & SYNC RECOVERY ---
+    // Tournament socket events removed
+
+    socket.on("get_lobby_stats", async () => {
+      try {
+        const liveGames = await Game.countDocuments({ status: "playing" });
+        socket.emit("lobby_stats_update", {
+          onlinePlayers: onlinePlayers.size,
+          activeGames: liveGames,
+        });
+      } catch (err) {
+        console.error("get_lobby_stats error:", err);
+      }
+    });
+
+    socket.on("GET_STATS", async () => {
+      try {
+        const liveGames = await Game.countDocuments({ status: "playing" });
+        socket.emit("UPDATE_STATS", {
+          online: onlinePlayers.size,
+          liveGames,
+        });
+      } catch (err) {
+        console.error("GET_STATS error:", err);
+      }
+    });
+
+    socket.on("joinGame", (gameData) => {
+      try {
+        if (!gameData || !gameData.id) return;
+        global.ACTIVE_MATCHES = global.ACTIVE_MATCHES || [];
+        const existingIndex = global.ACTIVE_MATCHES.findIndex((m) => m.id === gameData.id);
+        const matchPayload = {
+          ...gameData,
+          status: gameData.status || "playing",
+          players: gameData.players || [],
+        };
+
+        if (existingIndex !== -1) {
+          global.ACTIVE_MATCHES[existingIndex] = {
+            ...global.ACTIVE_MATCHES[existingIndex],
+            ...matchPayload,
+          };
+        } else {
+          global.ACTIVE_MATCHES.push(matchPayload);
+        }
+
+        gameNamespace.emit("liveMatchesUpdate", global.ACTIVE_MATCHES);
+      } catch (err) {
+        console.error("joinGame live matches error:", err);
+      }
+    });
+
+    socket.on("endGame", (gameId) => {
+      try {
+        if (!gameId) return;
+        global.ACTIVE_MATCHES = (global.ACTIVE_MATCHES || []).filter((g) => g.id !== gameId);
+        gameNamespace.emit("liveMatchesUpdate", global.ACTIVE_MATCHES);
+      } catch (err) {
+        console.error("endGame live matches error:", err);
+      }
+    });
+
+    socket.emit("liveMatchesUpdate", global.ACTIVE_MATCHES || []);
+
+    const handleTimeExpired = async (roomId) => {
+      const game = activeGames[roomId];
+      if (!game || game.status !== "playing" || game.type !== "time") return;
+
+      if (game.matchTimer) {
+        clearTimeout(game.matchTimer);
+        delete game.matchTimer;
+      }
+      if (game.timerInterval) {
+        clearInterval(game.timerInterval);
+        delete game.timerInterval;
+      }
+
+      const scoreEntries = game.players.map((player) => {
+        const score = (game.gameState?.scores?.[player.color] ?? 0) ||
+          game.tokens[player.color].reduce((sum, token) => sum + (token.steps || 0), 0);
+        return { player, score };
+      });
+
+      scoreEntries.sort((a, b) => b.score - a.score);
+      const top = scoreEntries[0];
+      const second = scoreEntries[1];
+      const winner = top.player;
+      const winnerScore = top.score;
+      const loserScore = second?.score ?? 0;
+      const tie = second && top.score === second.score;
+
+      await handleGameOver(roomId, winner.userId, {
+        reason: "Time Over",
+        message: tie
+          ? "Time over! Match tied, winner selected by entry order."
+          : `Time over! ${winner.name || "Winner"} wins with ${winnerScore} points against ${loserScore}.`
+      });
+    };
+
+    const scheduleMatchEnd = (roomId, game) => {
+      if (!game || game.type !== "time" || !game.timeEndAt) return;
+      const remaining = new Date(game.timeEndAt).getTime() - Date.now();
+      if (remaining <= 0) {
+        return handleTimeExpired(roomId);
+      }
+      if (activeGames[roomId]?.matchTimer) {
+        clearTimeout(activeGames[roomId].matchTimer);
+      }
+      activeGames[roomId].matchTimer = setTimeout(() => {
+        handleTimeExpired(roomId);
+      }, remaining);
+    };
+
+    const startTimeModeTimer = (roomId, game) => {
+      if (!game || game.type !== "time") return;
+
+      if (game.timerInterval) {
+        clearInterval(game.timerInterval);
+      }
+
+      if (!game.timeEndAt) {
+        game.timeEndAt = new Date(Date.now() + TIME_MODE_DURATION);
+      }
+
+      const emitTimer = () => {
+        if (!activeGames[roomId] || activeGames[roomId].status !== "playing") {
+          if (game.timerInterval) {
+            clearInterval(game.timerInterval);
+            delete game.timerInterval;
+          }
+          return;
+        }
+
+        const remaining = Math.max(
+          0,
+          Math.ceil((new Date(game.timeEndAt).getTime() - Date.now()) / 1000)
+        );
+
+        gameNamespace.to(roomId).emit("gameTimerUpdate", { gameTimer: remaining });
+
+        if (remaining <= 0) {
+          if (game.timerInterval) {
+            clearInterval(game.timerInterval);
+            delete game.timerInterval;
+          }
+          handleTimeExpired(roomId);
+        }
+      };
+
+      emitTimer();
+      game.timerInterval = setInterval(emitTimer, 1000);
+    };
+
+    const clearClassicTurnTimer = (roomId) => {
+      if (activeTurnTimers[roomId]) {
+        clearTimeout(activeTurnTimers[roomId]);
+        delete activeTurnTimers[roomId];
+      }
+    };
+
+    const clearQuickTurnTimer = (roomId) => {
+      if (activeQuickTurnTimers[roomId]) {
+        clearInterval(activeQuickTurnTimers[roomId]);
+        delete activeQuickTurnTimers[roomId];
+      }
+    };
+
+    const startQuickTurnTimer = async (roomId) => {
+      clearQuickTurnTimer(roomId);
+      const game = activeGames[roomId];
+      if (!game || game.status !== 'playing' || game.type !== 'classic') return;
+
+      let remaining = QUICK_TURN_DURATION; // seconds
+      // emit initial tick
+      gameNamespace.to(roomId).emit('TIMER_TICK', { remainingSeconds: Math.ceil(remaining) });
+
+      activeQuickTurnTimers[roomId] = setInterval(async () => {
+        remaining -= 0.25; // tick 250ms
+        const send = Math.max(0, Math.ceil(remaining));
+        try { gameNamespace.to(roomId).emit('TIMER_TICK', { remainingSeconds: send }); } catch (e) {}
+        if (remaining <= 0) {
+          clearQuickTurnTimer(roomId);
+          await handleQuickTurnTimeout(roomId);
+        }
+      }, 250);
+    };
+
+    const handleQuickTurnTimeout = async (roomId) => {
+      const game = activeGames[roomId];
+      if (!game || game.status !== 'playing') return;
+      const currentIndex = game.gameState.currentTurn;
+      const currentPlayer = game.players[currentIndex];
+      if (!currentPlayer) return;
+
+      const userId = currentPlayer.userId.toString();
+
+      // Decrement hearts on server-side player state
+      game.players[currentIndex].hearts = Math.max(0, (game.players[currentIndex].hearts || 3) - 1);
+
+      // Broadcast state update and timeout notice
+      gameNamespace.to(roomId).emit('PLAYER_TIMEOUT', { userId, playerIndex: currentIndex, hearts: game.players[currentIndex].hearts });
+      gameNamespace.to(roomId).emit('GAME_STATE_UPDATE', getGameStateForClient(game));
+
+      // If player has no hearts left, disqualify and end match
+      if (game.players[currentIndex].hearts <= 0) {
+        game.players[currentIndex].disqualified = true;
+        game.status = 'finished';
+        const winner = game.players.find((p, idx) => idx !== currentIndex && !p.disqualified);
+        if (winner) {
+          // finalize winner settlement
+          await handleGameOver(roomId, winner.userId, { reason: 'Player Disqualified', message: 'Opponent eliminated by timeouts.' });
+        } else {
+          // fallback: end game without winner
+          gameNamespace.to(roomId).emit('GAME_ENDED', { reason: 'All players disqualified' });
+          delete activeGames[roomId];
+        }
+        return;
+      }
+
+      // Advance turn to next non-disqualified player
+      const total = game.players.length || 0;
+      let next = (currentIndex + 1) % total;
+      for (let i = 0; i < total; i++) {
+        const cand = game.players[(currentIndex + 1 + i) % total];
+        if (cand && !cand.disqualified) { next = (currentIndex + 1 + i) % total; break; }
+      }
+
+      game.gameState.currentTurn = next;
+      game.gameState.turnStartTime = Date.now();
+      game.gameState.turnTimeLimit = CLASSIC_TURN_DURATION;
+
+      // persist change
+      try {
+        await Game.findOneAndUpdate({ roomId }, {
+          'gameState.currentTurn': game.gameState.currentTurn,
+          'gameState.turnStartTime': game.gameState.turnStartTime,
+          'gameState.turnTimeLimit': game.gameState.turnTimeLimit,
+        });
+      } catch (e) { dbg('Quick timer DB update error', e); }
+
+      gameNamespace.to(roomId).emit('turnChanged', {
+        turn: game.gameState.currentTurn,
+        turnStartTime: game.gameState.turnStartTime,
+        turnTimeLimit: game.gameState.turnTimeLimit,
+        message: 'Turn passed due to timeout.'
+      });
+
+      // broadcast updated state
+      gameNamespace.to(roomId).emit('GAME_STATE_UPDATE', getGameStateForClient(game));
+
+      // start quick timer for next player
+      startQuickTurnTimer(roomId).catch(e => dbg('Quick timer restart error', e));
+    };
+
+    const resetPlayerMissedCount = (roomId, userId) => {
+      if (!missedTurnCounts[roomId]) return;
+      delete missedTurnCounts[roomId][userId];
+    };
+
+    const scheduleClassicTurnTimer = async (roomId) => {
+      clearClassicTurnTimer(roomId);
+      const game = activeGames[roomId];
+      if (!game || game.status !== "playing" || game.type !== "classic") return;
+
+      game.gameState.turnStartTime = Date.now();
+      game.gameState.turnTimeLimit = CLASSIC_TURN_DURATION;
+
+      activeTurnTimers[roomId] = setTimeout(() => {
+        handleClassicTurnTimeout(roomId);
+      }, CLASSIC_TURN_DURATION * 1000);
+
+      // Start the authoritative quick 6s timer alongside classic turn timer
+      try { startQuickTurnTimer(roomId); } catch (e) { dbg('Quick timer start error', e); }
+
+      await Game.findOneAndUpdate(
+        { roomId },
+        {
+          "gameState.turnStartTime": game.gameState.turnStartTime,
+          "gameState.turnTimeLimit": game.gameState.turnTimeLimit
+        }
+      );
+    };
+
+    const handleClassicTurnTimeout = async (roomId) => {
+      const game = activeGames[roomId];
+      if (!game || game.status !== "playing" || game.type !== "classic") return;
+
+      const currentIndex = game.gameState.currentTurn;
+      const currentPlayer = game.players[currentIndex];
+      if (!currentPlayer) return;
+
+      const userId = currentPlayer.userId.toString();
+      missedTurnCounts[roomId] = missedTurnCounts[roomId] || {};
+      missedTurnCounts[roomId][userId] = (missedTurnCounts[roomId][userId] || 0) + 1;
+
+      const opponent = game.players.find((p) => p.userId.toString() !== userId);
+      if (!opponent) return;
+
+      if (missedTurnCounts[roomId][userId] >= 2) {
+        clearClassicTurnTimer(roomId);
+        return handleGameOver(roomId, opponent.userId, {
+          reason: "Timeout Loss",
+          message: "Opponent missed two turns. You win by timeout."
+        });
+      }
+
+      game.gameState.currentTurn = ludoEngine.getNextTurn(currentIndex, game.players.length, 0, false);
+      game.gameState.turnStartTime = Date.now();
+      game.gameState.turnTimeLimit = CLASSIC_TURN_DURATION;
+
+      gameNamespace.to(roomId).emit("turnMissedAlert", {
+        userId,
+        message: "1st Warning: You missed your turn. Turn skipped."
+      });
+
+      await Game.findOneAndUpdate(
+        { roomId },
+        {
+          "gameState.currentTurn": game.gameState.currentTurn,
+          "gameState.turnStartTime": game.gameState.turnStartTime,
+          "gameState.turnTimeLimit": game.gameState.turnTimeLimit
+        }
+      );
+
+      gameNamespace.to(roomId).emit("turnChanged", {
+        turn: game.gameState.currentTurn,
+        turnStartTime: game.gameState.turnStartTime,
+        turnTimeLimit: game.gameState.turnTimeLimit,
+        message: "Chance skipped due to timeout!"
+      });
+
+      await scheduleClassicTurnTimer(roomId);
+    };
+
+    const getGameStateForClient = (game) => {
+      if (!game) return null;
+      const { matchTimer, disconnectTimer, timerInterval, scores, ...safeGame } = game;
+      return JSON.parse(JSON.stringify(safeGame));
+    };
+
+    socket.on("checkActiveGame", async () => {
+      try {
+        let activeGame = Object.values(activeGames).find(
+          (g) => g.status === "playing" && g.players.some((p) => p.userId.toString() === socket.userId)
+        );
+
+        if (!activeGame) {
+          const dbGame = await Game.findOne({ "players.userId": socket.userId, status: "playing" });
+          if (dbGame) {
+            activeGame = dbGame.toObject();
+          }
+        }
+
+        if (!activeGame) return;
+
+        socket.emit("activeGameFound", { roomId: activeGame.roomId });
+      } catch (err) {
+        console.error("Active game recovery error:", err);
+      }
+    });
+
+    /**
+     * 🎯 MATCHMAKING LOGIC
+     */
+    const handleJoinMatchmaking = async ({ type, entryFee, selectedColor }) => {
+      try {
+        const fee = Number(entryFee);
+        const requestedColor = normalizeColor(selectedColor);
+        const chosenColor = isAllowedColor(requestedColor) ? requestedColor : "red";
+        const user = await User.findById(socket.userId);
+
+        const hasBalance = (user.wallet?.deposit || 0) + (user.wallet?.winnings || 0) + (user.wallet?.bonus || 0) >= fee;
+        if (!hasBalance) {
+          return socket.emit("error_msg", "Insufficient balance to join match.");
+        }
+
+        // Remove duplicates from queue
+        waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
+        
+        // Find Opponent
+        const opponentIndex = waitingPlayers.findIndex(p => p.type === type && p.entryFee === fee);
+
+        if (opponentIndex === -1) {
+          waitingPlayers.push({ userId: socket.userId, socketId: socket.id, type, entryFee: fee, selectedColor: chosenColor });
+          return socket.emit("waiting", { message: "Searching for opponent..." });
+        }
+
+        // 🤝 MATCH FOUND!
+        const opponent = waitingPlayers.splice(opponentIndex, 1)[0];
+        const oppUser = await User.findById(opponent.userId);
+
+        // Double check opponent eligibility before starting
+        const oppHasBalance = (oppUser.wallet?.deposit || 0) + (oppUser.wallet?.winnings || 0) + (oppUser.wallet?.bonus || 0) >= fee;
+        if (!oppHasBalance) {
+          return socket.emit("error_msg", "Opponent no longer eligible.");
+        }
+
+        // 4. DEDUCT ENTRY FEE (Priority Logic)
+        await user.deductEntryFee(fee);
+        await oppUser.deductEntryFee(fee);
+
+        // 5. INITIALIZE DB RECORD
+        const roomId = `TP_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+        const totalPool = fee * 2;
+        const adminFee = Math.max(1, Math.ceil(totalPool * 0.02)); // 2% admin fee minimum 1
+        const prize = totalPool - adminFee;
+
+        // Decide final player colors
+        const waitingColor = normalizeColor(opponent.selectedColor || "red");
+        const primaryColor = isAllowedColor(waitingColor) ? waitingColor : "red";
+        const opponentColor = getOppositeColor(primaryColor);
+
+        const firstPlayerColor = primaryColor;
+        const secondPlayerColor = opponentColor;
+
+        const engineState = ludoEngine.initializeGame([firstPlayerColor, secondPlayerColor], type);
+
+        const gameRecord = await Game.create({
+          gameId: roomId,
+          roomId,
+          gameType: "ludo",
+          type,
+          mode: type || "classic",
+          entryFee: fee,
+          potAmount: totalPool,
+          adminCommission: adminFee,
+          prizeMoney: prize,
+          players: [
+            { userId: oppUser._id, name: oppUser.name, color: firstPlayerColor, socketId: opponent.socketId },
+            { userId: user._id, name: user.name, color: secondPlayerColor, socketId: socket.id }
+          ],
+          status: "playing",
+          startedAt: new Date(),
+          timeEndAt: type === "time" ? new Date(Date.now() + TIME_MODE_DURATION) : null,
+          gameState: engineState,
+          tokens: engineState.tokens
+        });
+
+        console.log("✅ Match saved for Admin Panel:", roomId);
+
+        // 6. INITIALIZE ENGINE & STATE
+        activeGames[roomId] = {
+          ...gameRecord.toObject(),
+          scores: { [firstPlayerColor]: 0, [secondPlayerColor]: 0 }
+        };
+
+        // Schedule the time-mode end if needed
+        scheduleMatchEnd(roomId, activeGames[roomId]);
+        if (type === "classic") await scheduleClassicTurnTimer(roomId);
+        if (type === "time") startTimeModeTimer(roomId, activeGames[roomId]);
+
+        // 7. JOIN ROOMS
+        socket.join(roomId);
+
+        const adapter = gameNamespace.adapter;
+        if (!adapter || !adapter.rooms) {
+          console.error("❌ Socket adapter not found or rooms unavailable");
+        } else {
+          const room = adapter.rooms.get(roomId);
+          const numClients = room ? room.size : 0;
+          console.log(`🔎 Room ${roomId} currently has ${numClients} connected client(s)`);
+        }
+
+        const oppSocket = gameNamespace.sockets?.get?.(opponent.socketId)
+          ?? gameNamespace.sockets?.sockets?.get?.(opponent.socketId)
+          ?? null;
+        if (oppSocket) {
+          oppSocket.join(roomId);
+        } else {
+          console.warn("⚠️ Opponent socket not found for matchmaking:", opponent.socketId);
+        }
+
+        // 8. 🏁 EMIT EVENTS
+        // Notify lobby about new room and players
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("roomCreated", {
+          roomId,
+          players: activeGames[roomId].players,
+          mode: activeGames[roomId].type,
+          entryFee: fee
+        });
+        // Notify room participants
+        gameNamespace.to(roomId).emit("matchFound", { roomId });
+        gameNamespace.to(roomId).emit("GAME_STARTING", {
+          success: true,
+          roomId,
+          players: activeGames[roomId].players,
+          mode: activeGames[roomId].type
+        });
+        gameNamespace.to(roomId).emit("GAME_STARTED", {
+          success: true,
+          roomId,
+          mode: gameRecord.mode
+        });
+        // Also emit playerJoined for lobby visibility
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit("playerJoined", {
+          roomId,
+          userId: socket.userId,
+          players: activeGames[roomId].players
+        });
+        updateStats();
+
+        // Delayed state to sync with frontend navigation
+        setTimeout(() => {
+          if (activeGames[roomId]) {
+            gameNamespace.to(roomId).emit("gameState", getGameStateForClient(activeGames[roomId]));
+          }
+        }, 1200);
+
+      } catch (err) {
+        console.error("Matchmaking Error:", err);
+        socket.emit("error_msg", "Matchmaking failed. Please try again.");
+      }
+    };
+
+    socket.on("joinMatchmaking", handleJoinMatchmaking);
+    socket.on("JOIN_GAME", async ({ gameType, gameMode, entryFee, selectedColor }) => {
+      return handleJoinMatchmaking({
+        type: String(gameMode || gameType || "classic"),
+        entryFee,
+        selectedColor
+      });
+    });
+    socket.on("cancelMatchmaking", () => {
+      waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
+      socket.emit("matchmakingError", { message: "Matchmaking cancelled." });
+    });
+
+    // Relay reconnecting/reconnect events from client to lobby
+    socket.on('reconnecting', () => {
+      try {
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit('reconnecting', { userId: socket.userId });
+      } catch (e) { console.warn('reconnecting relay error', e); }
+    });
+    socket.on('reconnectSuccess', () => {
+      try {
+        gameNamespace.server && gameNamespace.server.emit && gameNamespace.server.emit('reconnectSuccess', { userId: socket.userId });
+      } catch (e) { console.warn('reconnectSuccess relay error', e); }
+    });
+
+    /**
+     * 🎯 JOIN ROOM (Recovery)
+     */
     socket.on("joinRoom", async ({ roomId }) => {
       let game = activeGames[roomId];
       let wasOffline = false;
@@ -132,8 +678,7 @@ module.exports = (gameNamespace) => {
         }
 
         socket.join(roomId);
-        // 🔥 Sync with Frontend Structure Event Name
-        gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(game));
+        socket.emit("gameState", getGameStateForClient(game));
         scheduleMatchEnd(roomId, activeGames[roomId]);
         if (game.type === "classic") await scheduleClassicTurnTimer(roomId);
         if (game.type === "time") startTimeModeTimer(roomId, activeGames[roomId]);
@@ -150,30 +695,126 @@ module.exports = (gameNamespace) => {
       }
     });
 
-    // --- 🎲 AUTHORITATIVE ROLL DICE REQUEST LISTENER ---
-    socket.on("ROLL_DICE_REQUEST", ({ roomId, userId }) => {
+    socket.on("rejoinGame", async ({ roomId }) => {
+      let game = activeGames[roomId];
+      if (!game) {
+        const dbGame = await Game.findOne({ roomId, status: "playing" });
+        if (dbGame) {
+          activeGames[roomId] = dbGame.toObject();
+          game = activeGames[roomId];
+        }
+      }
+
+      if (!game) return;
+      const player = game.players.find((p) => p.userId.toString() === socket.userId);
+      if (!player) return;
+
+      const timerKey = `${roomId}-${player.userId}`;
+      if (activeTimers[timerKey]) {
+        clearTimeout(activeTimers[timerKey]);
+        delete activeTimers[timerKey];
+      }
+
+      player.isOnline = true;
+      player.socketId = socket.id;
+      player.lastSeen = new Date();
+
+      await Game.findOneAndUpdate(
+        { roomId, "players.userId": player.userId },
+        { $set: { "players.$.isOnline": true, "players.$.socketId": socket.id, "players.$.lastSeen": new Date() } }
+      );
+
+      socket.join(roomId);
+      socket.emit("gameState", getGameStateForClient(game));
+      scheduleMatchEnd(roomId, activeGames[roomId]);
+      if (game.type === "time") startTimeModeTimer(roomId, activeGames[roomId]);
+      gameNamespace.to(roomId).emit("playerStatusChanged", {
+        userId: player.userId,
+        isOnline: true,
+        message: "Opponent rejoined the game!"
+      });
+    });
+
+    socket.on("leaveGame", async ({ roomId }) => {
+      const game = activeGames[roomId] || await Game.findOne({ roomId, status: "playing" });
+      if (!game || game.status !== "playing") return;
+
+      const player = game.players.find((p) => p.userId.toString() === socket.userId);
+      if (!player) return;
+
+      player.isOnline = false;
+      player.socketId = null;
+      player.lastSeen = new Date();
+
+      await Game.findOneAndUpdate(
+        { roomId, "players.userId": player.userId },
+        { $set: { "players.$.isOnline": false, "players.$.socketId": null, "players.$.lastSeen": new Date() } }
+      );
+
+      gameNamespace.to(roomId).emit("playerStatusChanged", {
+        userId: player.userId,
+        isOnline: false,
+        message: "Opponent left the game. They have 30 seconds to return."
+      });
+
+      const timerKey = `${roomId}-${player.userId}`;
+      if (activeTimers[timerKey]) {
+        clearTimeout(activeTimers[timerKey]);
+      }
+
+      activeTimers[timerKey] = setTimeout(async () => {
+        const finalCheck = await Game.findOne({ roomId, status: "playing" });
+        if (!finalCheck) return;
+
+        const pStatus = finalCheck.players.find((p) => p.userId.toString() === player.userId.toString());
+        if (!pStatus || pStatus.isOnline) return;
+
+        const winner = finalCheck.players.find((p) => p.userId.toString() !== player.userId.toString());
+        if (!winner) return;
+
+        finalCheck.status = "finished";
+        finalCheck.winner = { userId: winner.userId, prize: finalCheck.prizeMoney };
+        finalCheck.finishReason = "Opponent Disconnected";
+        finalCheck.finishedAt = new Date();
+        await finalCheck.save();
+
+        await User.findByIdAndUpdate(winner.userId, {
+          $inc: { "wallet.winnings": finalCheck.prizeMoney }
+        });
+
+        gameNamespace.to(roomId).emit("gameOver", {
+          winnerId: winner.userId,
+          prize: finalCheck.prizeMoney,
+          message: "Opponent didn't return in 30s. You won!",
+          reason: "Opponent Left"
+        });
+
+        delete activeGames[roomId];
+        delete activeTimers[timerKey];
+      }, RECONNECT_TIMEOUT);
+    });
+
+    /**
+     * 🎲 ROLL DICE
+     */
+    socket.on("rollDice", ({ roomId }) => {
       const game = activeGames[roomId];
       if (!game || game.status !== "playing") return;
 
       const playerIdx = game.gameState.currentTurn;
-      const currentPlayer = game.players[playerIdx];
-      if (!currentPlayer || currentPlayer.userId.toString() !== userId) return;
-
-      // Reset turn timelines seamlessly on a valid dice intent tap
-      clearQuickTurnTimer(roomId);
-      clearClassicTurnTimer(roomId);
+      if (game.players[playerIdx].userId.toString() !== socket.userId) return;
 
       const dice = ludoEngine.rollDice();
       game.gameState.diceValue = dice;
-      game.currentDiceValue = dice; // Pass through to frontend cube placeholder directly
       game.gameState.turnStartTime = Date.now();
       game.gameState.turnTimeLimit = game.type === "classic" ? CLASSIC_TURN_DURATION : 20;
-      resetPlayerMissedCount(roomId, userId);
-
-      const color = currentPlayer.color;
+      resetPlayerMissedCount(roomId, socket.userId);
+      const color = game.players[playerIdx].color;
       const moves = ludoEngine.getValidMoves(game.tokens, color, dice, game.type);
+      if (game.type === "classic") {
+        scheduleClassicTurnTimer(roomId).catch((err) => console.error("Classic timer start error:", err));
+      }
 
-      // Symmetrical Event Dispatcher Triggers
       gameNamespace.to(roomId).emit("diceRolled", {
         dice,
         moves,
@@ -183,31 +824,30 @@ module.exports = (gameNamespace) => {
         totalMoves: game.gameState.totalMoves
       });
 
-      gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(game));
-
+      // Auto-skip if no moves possible
       if (moves.length === 0) {
-        setTimeout(async () => {
+        setTimeout(() => {
           if (!activeGames[roomId]) return;
-          game.gameState.currentTurn = ludoEngine.getNextTurn(playerIdx, game.players.length, dice, false);
+          game.gameState.currentTurn = ludoEngine.getNextTurn(playerIdx, 2, dice, false);
           game.gameState.turnStartTime = Date.now();
-          
+          game.gameState.turnTimeLimit = game.type === "classic" ? CLASSIC_TURN_DURATION : 20;
+
+          if (game.type === "classic") {
+            scheduleClassicTurnTimer(roomId).catch((err) => console.error("Classic timer start error:", err));
+          }
+
           gameNamespace.to(roomId).emit("turnChanged", {
             turn: game.gameState.currentTurn,
             turnStartTime: game.gameState.turnStartTime,
             turnTimeLimit: game.gameState.turnTimeLimit
           });
-
-          gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(game));
-          if (game.type === "classic") await scheduleClassicTurnTimer(roomId);
         }, 1500);
-      } else {
-        if (game.type === "classic") {
-          scheduleClassicTurnTimer(roomId).catch((err) => console.error("Classic timer re-route error:", err));
-        }
       }
     });
 
-    // --- 🏃 MOVE TOKEN PROCESSOR ---
+    /**
+     * 🏃 MOVE TOKEN
+     */
     socket.on("moveToken", async ({ roomId, tokenIndex, action }) => {
       const game = activeGames[roomId];
       if (!game || game.status !== "playing") return;
@@ -219,28 +859,34 @@ module.exports = (gameNamespace) => {
       const dice = game.gameState.diceValue;
       if (!dice || dice <= 0) return;
 
-      clearQuickTurnTimer(roomId);
-      clearClassicTurnTimer(roomId);
-
       if (!game.gameState.scores) {
         game.gameState.scores = { red: 0, green: 0, blue: 0, yellow: 0 };
+      } else {
+        game.gameState.scores = {
+          red: game.gameState.scores.red || 0,
+          green: game.gameState.scores.green || 0,
+          blue: game.gameState.scores.blue || 0,
+          yellow: game.gameState.scores.yellow || 0
+        };
       }
+      const token = game.tokens[player.color]?.[tokenIndex];
+      if (!token) return;
+
+      if (action === "LAUNCH" && dice !== 6 && token.position === -1) return;
+      if (action === "MOVE" && token.position === -1) return;
 
       const result = ludoEngine.processMove(game, player.color, tokenIndex, dice);
-      if (!result.success) return socket.emit("error_msg", "Invalid Move Setup");
 
+      if (!result.success) return socket.emit("error_msg", "Invalid Move");
+
+      // Sync State with Engine
       game.tokens = result.tokens;
-      if (game.type === "turn" && game.totalTurnsLeft > 0) {
-        game.totalTurnsLeft -= 1;
+      if (game.type === "turn") {
+        game.gameState.totalMoves = Math.max(0, (typeof game.gameState.totalMoves === "number" ? game.gameState.totalMoves : 25) - 1);
       }
-
-      game.gameState.currentTurn = ludoEngine.getNextTurn(playerIdx, game.players.length, dice, result.killed);
+      game.gameState.currentTurn = ludoEngine.getNextTurn(playerIdx, 2, dice, result.killed);
       game.gameState.turnStartTime = Date.now();
-
-      // Dynamic score parameters tracking pipeline
-      game.players.forEach(p => {
-        p.score = game.gameState.scores[p.color] || 0;
-      });
+      game.gameState.turnTimeLimit = 20;
 
       gameNamespace.to(roomId).emit("tokenMoved", {
         tokens: game.tokens,
@@ -250,233 +896,44 @@ module.exports = (gameNamespace) => {
         killed: result.killed,
         killedInfo: result.killedInfo,
         nextTurn: game.gameState.currentTurn,
+        totalMoves: game.gameState.totalMoves,
         scores: game.gameState.scores || {}
       });
 
       if (result.winner) {
-        await handleGameOver(roomId, player.userId);
+        handleGameOver(roomId, player.userId);
       } else {
         resetPlayerMissedCount(roomId, player.userId);
-        gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(game));
-        
         if (game.type === "classic") {
           await scheduleClassicTurnTimer(roomId);
         }
-      }
-    });
-
-    // --- 🤝 MATCHMAKING HANDLER (WITH PRE-BOUND HEARTS) ---
-    const handleJoinMatchmaking = async ({ type, entryFee, selectedColor }) => {
-      try {
-        const fee = Number(entryFee);
-        const requestedColor = normalizeColor(selectedColor);
-        const chosenColor = isAllowedColor(requestedColor) ? requestedColor : "red";
-        const user = await User.findById(socket.userId);
-
-        const hasBalance = (user.wallet?.deposit || 0) + (user.wallet?.winnings || 0) + (user.wallet?.bonus || 0) >= fee;
-        if (!hasBalance) {
-          return socket.emit("error_msg", "Insufficient balance to join match.");
-        }
-
-        waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
-        
-        const opponentIndex = waitingPlayers.findIndex(p => p.type === type && p.entryFee === fee);
-
-        if (opponentIndex === -1) {
-          waitingPlayers.push({ userId: socket.userId, socketId: socket.id, type, entryFee: fee, selectedColor: chosenColor });
-          return socket.emit("waiting", { message: "Searching for opponent..." });
-        }
-
-        const opponent = waitingPlayers.splice(opponentIndex, 1)[0];
-        const oppUser = await User.findById(opponent.userId);
-
-        await user.deductEntryFee(fee);
-        await oppUser.deductEntryFee(fee);
-
-        const roomId = `TP_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
-        const totalPool = fee * 2;
-        const adminFee = Math.max(1, Math.ceil(totalPool * 0.02)); 
-        const prize = totalPool - adminFee;
-
-        const waitingColor = normalizeColor(opponent.selectedColor || "red");
-        const primaryColor = isAllowedColor(waitingColor) ? waitingColor : "red";
-        const opponentColor = getOppositeColor(primaryColor);
-
-        const engineState = ludoEngine.initializeGame([primaryColor, opponentColor], type);
-
-        const gameRecord = await Game.create({
-          gameId: roomId,
-          roomId,
-          gameType: "ludo",
-          type,
-          mode: type || "classic",
-          entryFee: fee,
-          potAmount: totalPool,
-          adminCommission: adminFee,
-          prizeMoney: prize,
-          players: [
-            { userId: oppUser._id, name: oppUser.name, color: primaryColor, socketId: opponent.socketId, lives: 3, score: 0, isOnline: true },
-            { userId: user._id, name: user.name, color: opponentColor, socketId: socket.id, lives: 3, score: 0, isOnline: true }
-          ],
-          status: "playing",
-          startedAt: new Date(),
-          gameState: engineState,
-          tokens: engineState.tokens
-        });
-
-        activeGames[roomId] = {
-          ...gameRecord.toObject(),
-          prizePool: prize.toFixed(2),
-          totalTurnsLeft: 25,
-          currentDiceValue: 6,
-          scores: { [primaryColor]: 0, [opponentColor]: 0 }
-        };
-
-        scheduleMatchEnd(roomId, activeGames[roomId]);
-        socket.join(roomId);
-
-        const oppSocket = gameNamespace.sockets?.get?.(opponent.socketId) || gameNamespace.sockets?.sockets?.get?.(opponent.socketId);
-        if (oppSocket) oppSocket.join(roomId);
-
-        gameNamespace.to(roomId).emit("matchFound", { roomId });
-        updateStats();
-
-        setTimeout(() => {
-          if (activeGames[roomId]) {
-            gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(activeGames[roomId]));
-            if (type === "classic") scheduleClassicTurnTimer(roomId);
+        if (game.type === "turn" && game.gameState.totalMoves <= 0) {
+          const winnerPlayer = game.players.reduce((best, p) => {
+            const score = game.gameState.scores?.[p.color] ?? 0;
+            if (!best || score > best.score) return { player: p, score };
+            return best;
+          }, null);
+          if (winnerPlayer) {
+            handleGameOver(roomId, winnerPlayer.player.userId, {
+              reason: "Turn Limit Reached",
+              message: `${winnerPlayer.player.name || 'Winner'} wins after 25 turns with ${winnerPlayer.score} points.`
+            });
           }
-        }, 1200);
-
-      } catch (err) {
-        console.error("Matchmaking Error Framework Fail:", err);
-        socket.emit("error_msg", "Matchmaking error context failure.");
+        } else {
+          // Broadcast turn change after move
+          gameNamespace.to(roomId).emit("turnChanged", {
+            turn: game.gameState.currentTurn,
+            turnStartTime: game.gameState.turnStartTime,
+            turnTimeLimit: game.gameState.turnTimeLimit,
+            totalMoves: game.gameState.totalMoves
+          });
+        }
       }
-    };
-
-    socket.on("joinMatchmaking", handleJoinMatchmaking);
-    socket.on("cancelMatchmaking", () => {
-      waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
     });
 
-    // --- ⏱️ DISCONNECT & RECOVERY LOOPS TIMEOUTS ---
-    const handleTimeExpired = async (roomId) => {
-      const game = activeGames[roomId];
-      if (!game || game.status !== "playing") return;
-
-      clearClassicTurnTimer(roomId);
-      clearQuickTurnTimer(roomId);
-
-      const winner = game.players.reduce((prev, current) => (prev.score > current.score) ? prev : current);
-      await handleGameOver(roomId, winner.userId, { reason: "Time Over", message: `Match completed! ${winner.name} wins by points.` });
-    };
-
-    const scheduleMatchEnd = (roomId, game) => {
-      if (!game || game.type !== "time" || !game.timeEndAt) return;
-      const remaining = new Date(game.timeEndAt).getTime() - Date.now();
-      if (remaining <= 0) return handleTimeExpired(roomId);
-      
-      if (game.matchTimer) clearTimeout(game.matchTimer);
-      game.matchTimer = setTimeout(() => handleTimeExpired(roomId), remaining);
-    };
-
-    const startTimeModeTimer = (roomId, game) => {
-      if (!game || game.type !== "time") return;
-      if (game.timerInterval) clearInterval(game.timerInterval);
-
-      game.timerInterval = setInterval(() => {
-        if (!activeGames[roomId]) return clearInterval(game.timerInterval);
-        const remaining = Math.max(0, Math.ceil((new Date(game.timeEndAt).getTime() - Date.now()) / 1000));
-        gameNamespace.to(roomId).emit("gameTimerUpdate", { gameTimer: remaining });
-        if (remaining <= 0) handleTimeExpired(roomId);
-      }, 1000);
-    };
-
-    const clearClassicTurnTimer = (roomId) => { if (activeTurnTimers[roomId]) clearTimeout(activeTurnTimers[roomId]); };
-    const clearQuickTurnTimer = (roomId) => { if (activeQuickTurnTimers[roomId]) clearInterval(activeQuickTurnTimers[roomId]); };
-
-    // 🔥 HIGH-END REFACTORED AUTHORITATIVE 6S TIME ARC TICKER ENGINE
-    const startQuickTurnTimer = async (roomId) => {
-      clearQuickTurnTimer(roomId);
-      const game = activeGames[roomId];
-      if (!game || game.status !== 'playing') return;
-
-      let remaining = QUICK_TURN_DURATION;
-      gameNamespace.to(roomId).emit('TIMER_TICK', { remainingSeconds: Math.ceil(remaining) });
-
-      activeQuickTurnTimers[roomId] = setInterval(async () => {
-        remaining -= 1;
-        const tickValue = Math.max(0, remaining);
-        
-        gameNamespace.to(roomId).emit('TIMER_TICK', { remainingSeconds: tickValue });
-
-        if (remaining <= 0) {
-          clearInterval(activeQuickTurnTimers[roomId]);
-          await handleQuickTurnTimeout(roomId);
-        }
-      }, 1000); // 1-Second strict ticks update interval
-    };
-
-    const handleQuickTurnTimeout = async (roomId) => {
-      const game = activeGames[roomId];
-      if (!game || game.status !== 'playing') return;
-
-      const playerIdx = game.gameState.currentTurn;
-      const currentPlayer = game.players[playerIdx];
-      if (!currentPlayer) return;
-
-      // Deduct lifeline parameters on server state arrays directly
-      currentPlayer.lives = Math.max(0, (currentPlayer.lives ?? 3) - 1);
-
-      // 🔥 Broadcast Symmetrical Toast Notification Banner Hook across streams
-      gameNamespace.to(roomId).emit('TURN_MISSED_NOTIFICATION', { 
-        message: `${currentPlayer.name || 'Opponent'} missed a turn!` 
-      });
-
-      if (currentPlayer.lives <= 0) {
-        clearQuickTurnTimer(roomId);
-        clearClassicTurnTimer(roomId);
-        const winner = game.players.find((p, idx) => idx !== playerIdx);
-        return handleGameOver(roomId, winner.userId, { reason: 'Timeout Disqualification', message: 'Opponent eliminated by 3 timeouts.' });
-      }
-
-      // Automatically advance pointer tracks
-      if (game.totalTurnsLeft > 0) game.totalTurnsLeft -= 1;
-      
-      game.gameState.currentTurn = (playerIdx + 1) % game.players.length;
-      game.gameState.turnStartTime = Date.now();
-
-      gameNamespace.to(roomId).emit("turnChanged", {
-        turn: game.gameState.currentTurn,
-        turnStartTime: game.gameState.turnStartTime,
-        turnTimeLimit: CLASSIC_TURN_DURATION
-      });
-
-      gameNamespace.to(roomId).emit("GAME_STATE_UPDATE", getGameStateForClient(game));
-      scheduleClassicTurnTimer(roomId).catch(e => dbg(e));
-    };
-
-    const scheduleClassicTurnTimer = async (roomId) => {
-      clearClassicTurnTimer(roomId);
-      const game = activeGames[roomId];
-      if (!game || game.status !== "playing") return;
-
-      activeTurnTimers[roomId] = setTimeout(() => {
-        handleQuickTurnTimeout(roomId);
-      }, CLASSIC_TURN_DURATION * 1000);
-
-      // Spark up circular progress track alongside baseline clocks
-      startQuickTurnTimer(roomId).catch(e => dbg(e));
-    };
-
-    const resetPlayerMissedCount = (roomId, userId) => { if (missedTurnCounts[roomId]) delete missedTurnCounts[roomId][userId]; };
-    const getGameStateForClient = (game) => {
-      if (!game) return null;
-      const { matchTimer, disconnectTimer, timerInterval, ...safeGame } = game;
-      return JSON.parse(JSON.stringify(safeGame));
-    };
-
-    // --- 🏆 WINNER & PRIZE SETTLEMENT POOL ---
+    /**
+     * 🏆 WINNER & PRIZE SETTLEMENT
+     */
     const handleGameOver = async (roomId, winnerId, options = {}) => {
       const game = activeGames[roomId];
       if (!game) return;
@@ -487,22 +944,43 @@ module.exports = (gameNamespace) => {
         winner.wallet.winnings += game.prizeMoney;
         await winner.save();
 
-        await Game.findOneAndUpdate({ roomId }, {
+        const update = {
           status: "finished",
           winner: { userId: winnerId, prize: game.prizeMoney },
-          finishReason: options.reason || "Game Ended",
           finishedAt: new Date()
-        });
+        };
+        if (options.reason) update.finishReason = options.reason;
 
+        await Game.findOneAndUpdate({ roomId }, update);
+
+        const winnerPlayer = game.players.find(p => p.userId.toString() === winnerId.toString());
         gameNamespace.to(roomId).emit("gameOver", {
+          winner: winnerId,
           winnerId,
           prize: game.prizeMoney,
+          name: winnerPlayer?.name || 'Winner',
+          avatar: winnerPlayer?.avatar || '/assets/avatar-1.png',
+          color: winnerPlayer?.color || 'red',
+          totalMoves: game.gameState.totalMoves,
+          scores: game.gameState.scores,
           reason: options.reason || "Game Finished",
-          message: options.message || "Match finished successfully."
+          message: options.message || "Game finished."
         });
 
+        if (game.disconnectTimer) {
+          clearTimeout(game.disconnectTimer);
+          delete game.disconnectTimer;
+        }
+        if (game.timerInterval) {
+          clearInterval(game.timerInterval);
+          delete game.timerInterval;
+        }
         clearClassicTurnTimer(roomId);
         clearQuickTurnTimer(roomId);
+        if (missedTurnCounts[roomId]) {
+          delete missedTurnCounts[roomId];
+        }
+
         delete activeGames[roomId];
         updateStats();
       } catch (err) {
@@ -510,10 +988,75 @@ module.exports = (gameNamespace) => {
       }
     };
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", async () => {
       waitingPlayers = waitingPlayers.filter(p => p.userId !== socket.userId);
       onlinePlayers.delete(socket.id);
       updateStats();
+
+      try {
+        const room = Object.values(activeGames).find(
+          (g) => g.status === "playing" && g.players.some((p) => p.socketId === socket.id)
+        );
+        if (!room) return;
+
+        const roomId = room.roomId;
+        const playerIndex = room.players.findIndex((p) => p.socketId === socket.id);
+        if (playerIndex === -1) return;
+
+        const player = room.players[playerIndex];
+        player.isOnline = false;
+        player.socketId = null;
+        player.lastSeen = new Date();
+
+        await Game.findOneAndUpdate(
+          { roomId, "players.userId": player.userId },
+          { $set: { "players.$.isOnline": false, "players.$.socketId": null, "players.$.lastSeen": new Date() } }
+        );
+
+        gameNamespace.to(roomId).emit("playerStatusChanged", {
+          userId: player.userId,
+          isOnline: false,
+          message: "Opponent disconnected. They have 30 seconds to return."
+        });
+
+        const timerKey = `${roomId}-${player.userId}`;
+        if (activeTimers[timerKey]) {
+          clearTimeout(activeTimers[timerKey]);
+        }
+
+        activeTimers[timerKey] = setTimeout(async () => {
+          const finalCheck = await Game.findOne({ roomId, status: "playing" });
+          if (!finalCheck) return;
+
+          const pStatus = finalCheck.players.find((p) => p.userId.toString() === player.userId.toString());
+          if (!pStatus || pStatus.isOnline) return;
+
+          const winner = finalCheck.players.find((p) => p.userId.toString() !== player.userId.toString());
+          if (!winner) return;
+
+          finalCheck.status = "finished";
+          finalCheck.winner = { userId: winner.userId, prize: finalCheck.prizeMoney };
+          finalCheck.finishReason = "Opponent Disconnected";
+          finalCheck.finishedAt = new Date();
+          await finalCheck.save();
+
+          await User.findByIdAndUpdate(winner.userId, {
+            $inc: { "wallet.winnings": finalCheck.prizeMoney }
+          });
+
+          gameNamespace.to(roomId).emit("gameOver", {
+            winnerId: winner.userId,
+            prize: finalCheck.prizeMoney,
+            message: "Opponent didn't return in 30s. You won!",
+            reason: "Opponent Left"
+          });
+
+          delete activeGames[roomId];
+          delete activeTimers[timerKey];
+        }, RECONNECT_TIMEOUT);
+      } catch (err) {
+        console.error("Disconnect handling error:", err);
+      }
     });
   });
 };

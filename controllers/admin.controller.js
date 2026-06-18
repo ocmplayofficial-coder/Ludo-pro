@@ -1,0 +1,824 @@
+import { AdminService } from "../services/admin.service.js";
+import { signToken } from "../config/jwt.js";
+import { env } from "../config/env.js";
+import { StatsService } from "../services/stats.service.js";
+import { db } from "../config/db.js";
+import { UserModel } from "../models/user.model.js";
+import { PaymentMethodModel } from "../models/paymentMethod.model.js";
+import { DepositRequestModel } from "../models/depositRequest.model.js";
+import { TransactionModel } from "../models/transaction.model.js";
+export class AdminController {
+  static async getAllUsers(req, res) {
+    console.log("🔥 GET_ALL_USERS CALLED");
+
+    try {
+      const rawUsers = await UserModel.find().lean();
+
+      const users = rawUsers.map(user => ({
+        _id: user._id,
+
+        name: user.username,
+
+        phone: user.phoneNumber,
+
+        wallet: {
+          deposit: user.depositBalance || 0,
+          winnings: user.winningsBalance || 0
+        },
+
+        status: user.status || "active"
+      }));
+
+      return res.json({
+        success: true,
+        users
+      });
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+    }
+  }
+
+  static async updateWallet(req, res) {
+    console.log("🔥 UPDATE_WALLET CALLED");
+    try {
+      const { userId, amount, type } = req.body;
+
+      const user = await UserModel.findById(userId);
+
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          message: "User not found"
+        });
+      }
+
+      if (type === "deposit") {
+        user.depositBalance += Number(amount);
+      }
+
+      if (type === "winning") {
+        user.winningsBalance += Number(amount);
+      }
+
+      user.walletBalance =
+        user.depositBalance +
+        user.winningsBalance;
+
+      await user.save();
+
+      return res.json({
+        success: true,
+        user
+      });
+
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+    }
+  }
+
+  static async banUser(req, res) {
+    try {
+      const { userId, status } = req.body;
+
+      const user = await UserModel.findByIdAndUpdate(
+        userId,
+        { status },
+        { new: true }
+      );
+
+      return res.json({
+        success: true,
+        user
+      });
+
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+    }
+  }
+  // ======================
+  // PAYMENT METHODS
+  // ======================
+
+  static async getPaymentMethods(req, res) {
+    try {
+
+      const paymentMethods =
+        await PaymentMethodModel.find()
+          .sort({ createdAt: -1 });
+
+      return res.json({
+        success: true,
+        paymentMethods
+      });
+
+    } catch (err) {
+
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+
+    }
+  }
+
+  static async addPaymentMethod(req, res) {
+    try {
+
+      const { type, upiId } = req.body;
+
+      const paymentMethod =
+        await PaymentMethodModel.create({
+
+          type,
+
+          upiId: upiId || "",
+
+          qrImage:
+            req.file?.filename || ""
+
+        });
+
+      return res.json({
+        success: true,
+        paymentMethod
+      });
+
+    } catch (err) {
+
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+
+    }
+  }
+
+  static async removePaymentMethod(req, res) {
+    try {
+
+      await PaymentMethodModel.findByIdAndDelete(
+        req.params.id
+      );
+
+      return res.json({
+        success: true
+      });
+
+    } catch (err) {
+
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+
+    }
+  }
+  // ======================
+  // CREATE GAME ARENA
+  // ======================
+  static async createGame(req, res) {
+    try {
+
+      const {
+        gameType,
+        mode,
+        entryFee,
+        winningPrize
+      } = req.body;
+
+      if (
+        !gameType ||
+        !mode ||
+        !entryFee ||
+        !winningPrize
+      ) {
+        return res.status(400).json({
+          success: false,
+          error: "Missing required fields"
+        });
+      }
+
+      const arena = {
+        id: Date.now().toString(),
+
+        gameType,
+
+        mode,
+
+        entryFee: Number(entryFee),
+
+        winningPrize: Number(winningPrize),
+
+        active: true,
+
+        createdAt: new Date()
+      };
+
+      db.gameArenas.push(arena);
+
+      console.log(
+        "NEW_ARENA_CREATED =",
+        arena
+      );
+
+      return res.json({
+        success: true,
+        arena
+      });
+
+    } catch (err) {
+
+      console.error(
+        "CREATE_GAME_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+
+  // ======================
+  // GET ALL ARENAS
+  // ======================
+  static async getArenas(req, res) {
+    try {
+
+      return res.json({
+        success: true,
+        arenas: db.gameArenas || []
+      });
+
+    } catch (err) {
+
+      console.error(
+        "GET_ARENAS_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+  // ======================
+  // LIVE MATCHES
+  // ======================
+  // ====================== 
+  // GAME STATS
+  // ======================
+  static async getGameStats(req, res) {
+    try {
+
+      const ludoGames = [...db.ludoGames.values()];
+
+      const totalGames = ludoGames.length;
+
+      const activeTables = ludoGames.filter(game =>
+        ["MATCHMAKING", "PLAYING", "PLAYING_PENDING"]
+          .includes(game.status)
+      ).length;
+
+      // Platform fee ₹30 per finished game
+      const revenue = ludoGames
+        .filter(game => game.status === "FINISHED")
+        .reduce((sum) => sum + 30, 0);
+
+      const systemAlerts = 0;
+
+      console.log("GAME_STATS =", {
+        totalGames,
+        activeTables,
+        revenue,
+        systemAlerts
+      });
+
+      return res.json({
+        success: true,
+        data: {
+          totalGames,
+          activeTables,
+          revenue,
+          systemAlerts
+        }
+      });
+
+    } catch (err) {
+
+      console.error(
+        "ADMIN_GAME_STATS_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+  // ======================
+  // LIVE MATCHES
+  // ======================
+  static async getLiveMatches(req, res) {
+    try {
+
+      console.log(
+        "LIVE_MATCHES_COUNT =",
+        db.ludoGames.size
+      );
+
+      const matches = [...db.ludoGames.values()]
+        .filter(game =>
+          ["MATCHMAKING", "PLAYING", "PLAYING_PENDING"]
+            .includes(game.status)
+        )
+        .map(game => ({
+          matchId: game.matchId,
+          entryFee: game.entryFee,
+          status: game.status,
+          createdAt: game.createdAt,
+
+          players: [
+            game.players?.red?.username || "Waiting",
+            game.players?.yellow?.username || "Waiting"
+          ]
+        }));
+
+      return res.json({
+        success: true,
+        matches
+      });
+
+    } catch (err) {
+
+      console.error(
+        "ADMIN_LIVE_MATCHES_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+  }
+  // ======================
+  // ADMIN LOGIN
+  // ======================
+  static async login(req, res) {
+    try {
+      const { email, password } = req.body;
+
+      if (
+        email !== env.ADMIN_EMAIL ||
+        password !== env.ADMIN_PASSWORD
+      ) {
+        return res.status(401).json({
+          success: false,
+          error: "Invalid admin credentials"
+        });
+      }
+
+      const token = signToken({
+        id: "admin",
+        role: "admin",
+        email
+      });
+
+      return res.json({
+        success: true,
+        token,
+        user: {
+          id: "admin",
+          role: "admin",
+          email
+        }
+      });
+
+    } catch (err) {
+      console.error("ADMIN_LOGIN_ERROR", err);
+
+      return res.status(500).json({
+        success: false,
+        error: "Login failed"
+      });
+    }
+
+  }
+
+  // ======================
+  // DASHBOARD STATS
+  // ======================
+  static async getDashboardStats(req, res) {
+    try {
+      const onlinePlayers =
+        await StatsService.getOnlinePlayers();
+
+      const liveLudo =
+        await StatsService.getLiveGames();
+
+      console.log(
+        "CONTROLLER_LIVE_LUDO =",
+        liveLudo
+      );
+
+      const liveTP =
+        await StatsService.getLiveTeenPattiGames();
+
+      const totalProfit =
+        await StatsService.getTotalProfit();
+
+      return res.json({
+        success: true,
+        data: {
+          onlinePlayers,
+          liveLudo,
+          liveTP,
+          totalProfit,
+          recentMatches: []
+        }
+      });
+
+    } catch (err) {
+      console.error(
+        "ADMIN_DASHBOARD_STATS_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+
+  }
+
+  // ======================
+  // GAMES
+  // ======================
+  static async getGames(req, res) {
+    try {
+
+      console.log(
+        "ADMIN_GAMES_LUDO =",
+        db.ludoGames.size
+      );
+
+      console.log(
+        "ADMIN_GAMES_TP =",
+        db.teenPattiGames.size
+      );
+
+      for (const game of db.ludoGames.values()) {
+        console.log(
+          "LUDO_GAME",
+          game.matchId,
+          game.status
+        );
+      }
+
+      const ludoGames = [...db.ludoGames.values()].map(game => ({
+        id: game.matchId,
+        type: "Ludo",
+
+        players:
+          Object.values(game.players || {})
+            .filter(Boolean)
+            .length,
+
+        winner: game.winner || "-",
+
+        prize: game.winningPrize || 0,
+
+        mode: game.variant || "Classic",
+
+        status: game.status,
+
+        createdAt: game.createdAt
+      }));
+
+      const teenPattiGames =
+        [...db.teenPattiGames.values()].map(game => ({
+          id: game.matchId,
+          type: "Teen Patti",
+
+          players: game.players?.length || 0,
+
+          winner: game.winner || "-",
+
+          prize: game.winningPrize || 0,
+
+          mode: game.variant || "Classic",
+
+          status: game.status,
+
+          createdAt: game.createdAt
+        }));
+
+      return res.json({
+        success: true,
+        games: [
+          ...ludoGames,
+          ...teenPattiGames
+        ]
+      });
+
+    } catch (err) {
+      console.error(
+        "ADMIN_GAMES_ERROR",
+        err
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: err.message
+      });
+    }
+
+  }
+
+  // ======================
+  // TRANSACTION ACTION
+  // ======================
+  static async handleTransactionAction(
+    req,
+    res
+  ) {
+    try {
+      const { id } = req.params;
+      const { action } = req.body;
+
+      const tx =
+        AdminService.handleTransactionAction(
+          req.user,
+          id,
+          action
+        );
+
+      return res.json({
+        success: true,
+        transaction: tx,
+        user: req.user
+      });
+
+    } catch (err) {
+      return res.status(400).json({
+        success: false,
+        error: err.message
+      });
+    }
+
+  }
+
+  // ======================
+  // FINANCIAL STATS
+  // ======================
+  static async getFinancialStats(req, res) {
+    try {
+      const depositResult = await TransactionModel.aggregate([
+        { $match: { type: "DEPOSIT", status: "SUCCESS" } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]);
+      const withdrawResult = await TransactionModel.aggregate([
+        { $match: { type: "WITHDRAW", status: "SUCCESS" } },
+        { $group: { _id: null, total: { $sum: "$amount" } } }
+      ]);
+      const totalDeposits = depositResult[0]?.total || 0;
+      const totalWithdrawals = withdrawResult[0]?.total || 0;
+      const platformRevenue = totalDeposits - totalWithdrawals;
+
+      return res.json({
+        success: true,
+        totalDeposits,
+        totalWithdrawals,
+        platformRevenue
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // ======================
+  // TRANSACTIONS LIST
+  // ======================
+  // static async getTransactions(req, res) {
+  //   try {
+  //     const transactions = await TransactionModel.find()
+  //       .populate("user", "username phoneNumber")
+  //       .populate("paymentMethod", "upiId qrImage type")
+  //       .sort({ createdAt: -1 });
+
+  //     console.log(
+  //       "FIRST_TRANSACTION",
+  //       JSON.stringify(transactions[0], null, 2)
+  //     );
+
+  //     return res.json({
+  //       success: true,
+  //       transactions
+  //     });
+
+  //   } catch (err) {
+  //     return res.status(500).json({
+  //       success: false,
+  //       message: err.message
+  //     });
+  //   }
+  // }
+  static async getTransactions(req, res) {
+
+    try {
+      const transactions = await TransactionModel.find()
+        .populate("user", "username phoneNumber")
+        .populate("paymentMethod", "upiId qrImage type")
+        .sort({ createdAt: -1 });
+      return res.json({ success: true, transactions });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // ======================
+  // APPROVE TRANSACTION
+  // ======================
+  static async approveTransaction(req, res) {
+    try {
+      const { id } = req.params;
+      const transaction = await TransactionModel.findById(id);
+      if (!transaction) {
+        return res.status(404).json({ success: false, message: "Transaction not found" });
+      }
+      if (transaction.status !== "PENDING") {
+        return res.status(400).json({ success: false, message: "Transaction already processed" });
+      }
+      transaction.status = "APPROVED";
+      await transaction.save();
+
+      // credit/debit user based on type
+      const user = await UserModel.findById(transaction.user);
+      if (user) {
+        if (transaction.type === "DEPOSIT") {
+          user.depositBalance += transaction.amount;
+        } else if (transaction.type === "WITHDRAW") {
+          user.depositBalance = Math.max(0, user.depositBalance - transaction.amount);
+        }
+        user.walletBalance = user.depositBalance + (user.winningsBalance || 0);
+        await user.save();
+      }
+
+      return res.json({ success: true, transaction });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // ======================
+  // REJECT TRANSACTION
+  // ======================
+  static async rejectTransaction(req, res) {
+    try {
+      const { id } = req.params;
+      const transaction = await TransactionModel.findById(id);
+      if (!transaction) {
+        return res.status(404).json({ success: false, message: "Transaction not found" });
+      }
+      if (transaction.status !== "PENDING") {
+        return res.status(400).json({ success: false, message: "Transaction already processed" });
+      }
+      transaction.status = "REJECTED";
+      await transaction.save();
+      return res.json({ success: true, transaction });
+    } catch (err) {
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  }
+
+  // ======================
+  // DEPOSIT REQUESTS
+  // ======================
+
+  static async getDepositRequests(req, res) {
+    try {
+      const depositRequests = await DepositRequestModel.find()
+        .populate("user", "username phoneNumber")
+        .populate("paymentMethod", "upiId qrImage type")
+        .sort({ createdAt: -1 });
+
+      return res.json({
+        success: true,
+        depositRequests
+      });
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+    }
+  }
+
+  static async handleDepositRequestAction(req, res) {
+    try {
+      const { id } = req.params;
+      const { action } = req.body; // "APPROVE" or "REJECT"
+
+      const depositRequest = await DepositRequestModel.findById(id);
+      if (!depositRequest) {
+        return res.status(404).json({
+          success: false,
+          message: "Deposit request not found"
+        });
+      }
+
+      if (depositRequest.status !== "PENDING") {
+        return res.status(400).json({
+          success: false,
+          message: "Deposit request already processed"
+        });
+      }
+
+      if (action === "APPROVE") {
+        depositRequest.status = "APPROVED";
+        await depositRequest.save();
+
+        const user = await UserModel.findById(depositRequest.user);
+        if (user) {
+          const amount = depositRequest.amount;
+          user.depositBalance += amount;
+          user.walletBalance = user.depositBalance + user.winningsBalance;
+
+          const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
+          user.notifications.push({
+            id: notifId,
+            message: `Your deposit request of ₹${amount} has been APPROVED.`,
+            read: false,
+            createdAt: new Date()
+          });
+
+          await user.save();
+
+          // const { addTransaction } = await import("../wallet/transaction.service.js");
+          let method = "UPI Gateway";
+          try {
+            const pm = await PaymentMethodModel.findById(depositRequest.paymentMethod);
+            if (pm && pm.upiId) {
+              method = `UPI (${pm.upiId})`;
+            }
+          } catch (e) {
+            // ignore
+          }
+
+          await TransactionModel.create({
+            user: user._id,
+            paymentMethod: depositRequest.paymentMethod,
+            type: "DEPOSIT",
+            amount: amount,
+            status: "SUCCESS",
+            method: method
+          });
+        }
+      } else if (action === "REJECT") {
+        depositRequest.status = "REJECTED";
+        await depositRequest.save();
+
+        const user = await UserModel.findById(depositRequest.user);
+        if (user) {
+          const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
+          user.notifications.push({
+            id: notifId,
+            message: `Your deposit request of ₹${depositRequest.amount} has been REJECTED.`,
+            read: false,
+            createdAt: new Date()
+          });
+          await user.save();
+        }
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid action. Use APPROVE or REJECT"
+        });
+      }
+
+      return res.json({
+        success: true,
+        depositRequest
+      });
+    } catch (err) {
+      return res.status(500).json({
+        success: false,
+        message: err.message
+      });
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import { createServer } from "http";
 import cors from "cors";
 import mongoose from "mongoose";
@@ -31,8 +32,10 @@ async function startServer() {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8080",
+    "https://ocmplay.netlify.app",
     "http://127.0.0.1:8080"
   ];
+  
 
   app.use(cors({
     origin(origin, callback) {
@@ -60,10 +63,35 @@ async function startServer() {
     const { PaymentMethodModel } = await import("./models/paymentMethod.model.js");
     const count = await PaymentMethodModel.countDocuments();
     if (count === 0) {
+      // try to copy a bundled QR from client build into uploads
+      const bundledQrCandidates = [
+        path.join(process.cwd(), 'client', 'dist', 'assets', 'QR.png'),
+        path.join(process.cwd(), '..', 'client', 'dist', 'assets', 'QR.png')
+      ];
+      let bundledQr = '';
+      for (const c of bundledQrCandidates) {
+        if (fs.existsSync(c)) {
+          bundledQr = c;
+          break;
+        }
+      }
+      let qrFilename = '';
+      try {
+        if (bundledQr && fs.existsSync(bundledQr)) {
+          const uploadsDir = path.join(process.cwd(), 'uploads');
+          if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
+          qrFilename = `${Date.now()}-QR.png`;
+          fs.copyFileSync(bundledQr, path.join(uploadsDir, qrFilename));
+          console.log('Copied bundled QR to uploads/', qrFilename);
+        }
+      } catch (e) {
+        console.warn('Failed copying bundled QR file', e);
+      }
+
       await PaymentMethodModel.create({
         type: "upi",
         upiId: "admin@upi",
-        qrImage: "",
+        qrCode: qrFilename,
         active: true
       });
       console.log("🟢 Seeded default active payment method (admin@upi)");

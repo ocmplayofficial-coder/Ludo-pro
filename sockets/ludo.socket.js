@@ -4,7 +4,12 @@ import { LudoService } from '../services/ludo.service.js';
 
 export function handleLudoSocket(ludoNamespace) {
   ludoNamespace.on('connection', (socket) => {
-    console.log('Ludo Socket.IO client connected:', socket.id, 'User:', socket.user._id);
+    const userId = socket.user?._id?.toString();
+    console.log('Ludo Socket.IO client connected:', socket.id, 'User:', userId);
+    if (userId) {
+      socket.join(userId);
+      console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
+    }
 
     socket.on('JOIN_GAME', (data) => {
       const { matchId } = data;

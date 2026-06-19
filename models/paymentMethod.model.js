@@ -13,7 +13,7 @@ const paymentMethodSchema = new mongoose.Schema(
             default: ""
         },
 
-        qrImage: {
+        qrCode: {
             type: String,
             default: ""
         },
@@ -21,6 +21,15 @@ const paymentMethodSchema = new mongoose.Schema(
         active: {
             type: Boolean,
             default: true
+        }
+        ,
+        usageCount: {
+            type: Number,
+            default: 0
+        },
+        lastUsedAt: {
+            type: Date,
+            default: null
         }
     },
     {

@@ -4,11 +4,15 @@ import { TeenPattiController } from '../controllers/teenpatti.controller.js';
 
 const router = express.Router();
 
-router.post("/matchmaking", authMiddleware, TeenPattiController.matchmaking);
+router.get("/arenas", authMiddleware, TeenPattiController.getArenas);
+router.get("/tables", authMiddleware, TeenPattiController.getTables);
+router.post("/join", authMiddleware, TeenPattiController.matchmaking);
+router.post("/leave", authMiddleware, TeenPattiController.leave);
+router.post("/place-bet", authMiddleware, TeenPattiController.chaal);
+router.post("/pack", authMiddleware, TeenPattiController.fold);
+router.post("/show", authMiddleware, TeenPattiController.show);
+router.get("/history", authMiddleware, TeenPattiController.getMatchHistory);
+router.post("/cancel-matchmaking", authMiddleware, TeenPattiController.cancelMatchmaking);
 router.get("/:id", authMiddleware, TeenPattiController.getGame);
-router.post("/:id/fold", authMiddleware, TeenPattiController.fold);
-router.post("/:id/seen", authMiddleware, TeenPattiController.seen);
-router.post("/:id/chaal", authMiddleware, TeenPattiController.chaal);
-router.post("/:id/show", authMiddleware, TeenPattiController.show);
 
 export default router;

@@ -7,6 +7,7 @@ import { UserModel } from "../models/user.model.js";
 import { PaymentMethodModel } from "../models/paymentMethod.model.js";
 import { DepositRequestModel } from "../models/depositRequest.model.js";
 import { TransactionModel } from "../models/transaction.model.js";
+import { TeenPattiMatchModel } from "../models/teenpattiMatch.model.js";
 export class AdminController {
   static async getAllUsers(req, res) {
     console.log("🔥 GET_ALL_USERS CALLED");
@@ -115,6 +116,8 @@ export class AdminController {
         await PaymentMethodModel.find()
           .sort({ createdAt: -1 });
 
+      console.log('PAYMENT METHOD FETCHED', paymentMethods.length);
+
       return res.json({
         success: true,
         paymentMethods
@@ -135,21 +138,32 @@ export class AdminController {
 
       const { type, upiId } = req.body;
 
-      const paymentMethod =
-        await PaymentMethodModel.create({
 
-          type,
+      console.log('UPLOAD REQ FILE =', req.file);
+      console.log('UPLOAD REQ FILES =', req.files);
+      console.log('UPLOAD REQ BODY =', req.body);
 
-          upiId: upiId || "",
+      // Support both req.file (single) and req.files (fields)
+      let qrFilename = "";
+      if (req.file && req.file.filename) qrFilename = req.file.filename;
+      else if (req.files) {
+        const files = req.files;
+        const firstFile = (files.qrCode && files.qrCode[0]) || (files.qrImage && files.qrImage[0]) || (files.file && files.file[0]) || (files.image && files.image[0]);
+        qrFilename = firstFile?.filename || "";
+      }
+      const paymentMethod = await PaymentMethodModel.create({
+        type,
+        upiId: upiId || "",
+        qrCode: qrFilename,
+        active: true
+      });
 
-          qrImage:
-            req.file?.filename || ""
-
-        });
+      console.log('PAYMENT METHOD SAVED', paymentMethod._id);
 
       return res.json({
         success: true,
-        paymentMethod
+        upiId: paymentMethod.upiId,
+        qrCode: paymentMethod.qrCode ? `/uploads/${paymentMethod.qrCode}` : ""
       });
 
     } catch (err) {
@@ -617,7 +631,7 @@ export class AdminController {
   //   try {
   //     const transactions = await TransactionModel.find()
   //       .populate("user", "username phoneNumber")
-  //       .populate("paymentMethod", "upiId qrImage type")
+  //       .populate("paymentMethod", "upiId qrCode type")
   //       .sort({ createdAt: -1 });
 
   //     console.log(
@@ -642,7 +656,7 @@ export class AdminController {
     try {
       const transactions = await TransactionModel.find()
         .populate("user", "username phoneNumber")
-        .populate("paymentMethod", "upiId qrImage type")
+        .populate("paymentMethod", "upiId qrCode type")
         .sort({ createdAt: -1 });
       return res.json({ success: true, transactions });
     } catch (err) {
@@ -713,7 +727,7 @@ export class AdminController {
     try {
       const depositRequests = await DepositRequestModel.find()
         .populate("user", "username phoneNumber")
-        .populate("paymentMethod", "upiId qrImage type")
+        .populate("paymentMethod", "upiId qrCode type")
         .sort({ createdAt: -1 });
 
       return res.json({
@@ -769,15 +783,15 @@ export class AdminController {
           await user.save();
 
           // const { addTransaction } = await import("../wallet/transaction.service.js");
-          let method = "UPI Gateway";
-          try {
-            const pm = await PaymentMethodModel.findById(depositRequest.paymentMethod);
-            if (pm && pm.upiId) {
-              method = `UPI (${pm.upiId})`;
-            }
-          } catch (e) {
-            // ignore
-          }
+              let method = "UPI Gateway";
+              try {
+                const pm = await PaymentMethodModel.findById(depositRequest.paymentMethod);
+                if (pm && pm.upiId) {
+                  method = `UPI (${pm.upiId})`;
+                }
+              } catch (e) {
+                // ignore
+              }
 
           await TransactionModel.create({
             user: user._id,
@@ -819,6 +833,108 @@ export class AdminController {
         success: false,
         message: err.message
       });
+    }
+  }
+
+  // ============================
+  // TEEN PATTI ADMIN METHODS
+  // ============================
+  static async createTPArena(req, res) {
+    try {
+      const { mode, entryFee, winningPrize } = req.body;
+      if (!mode || !entryFee || !winningPrize) {
+        return res.status(400).json({ success: false, error: "Missing required fields" });
+      }
+      const arena = {
+        id: "tp-" + Date.now().toString(),
+        gameType: "teenpatti",
+        mode: mode.toUpperCase(),
+        entryFee: Number(entryFee),
+        winningPrize: Number(winningPrize),
+        active: true,
+        createdAt: new Date()
+      };
+      db.gameArenas.push(arena);
+      return res.json({ success: true, arena });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  static async editTPArena(req, res) {
+    try {
+      const { id } = req.params;
+      const { mode, entryFee, winningPrize, active } = req.body;
+      const idx = db.gameArenas.findIndex(a => a.id === id);
+      if (idx === -1) {
+        return res.status(404).json({ success: false, error: "Arena not found" });
+      }
+      const arena = db.gameArenas[idx];
+      if (mode) arena.mode = mode.toUpperCase();
+      if (entryFee !== undefined) arena.entryFee = Number(entryFee);
+      if (winningPrize !== undefined) arena.winningPrize = Number(winningPrize);
+      if (active !== undefined) arena.active = !!active;
+
+      return res.json({ success: true, arena });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  static async deleteTPArena(req, res) {
+    try {
+      const { id } = req.params;
+      const idx = db.gameArenas.findIndex(a => a.id === id);
+      if (idx === -1) {
+        return res.status(404).json({ success: false, error: "Arena not found" });
+      }
+      db.gameArenas.splice(idx, 1);
+      return res.json({ success: true, message: "Arena deleted" });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  static getTPLiveMatches(req, res) {
+    try {
+      const matches = [...db.teenPattiGames.values()].filter(g => g.status === 'PLAYING');
+      return res.json({ success: true, matches });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  static async getTPStats(req, res) {
+    try {
+      const onlinePlayers = global.onlinePlayers ? global.onlinePlayers.size : 0;
+      const activeGamesList = [...db.teenPattiGames.values()].filter(g => g.status === 'PLAYING');
+      const activeTablesCount = activeGamesList.length;
+      
+      const finished = await TeenPattiMatchModel.find().lean();
+      
+      const totalBets = finished.reduce((sum, m) => sum + m.pot, 0) + activeGamesList.reduce((sum, g) => sum + g.pot, 0);
+      
+      // Platform keeps 10% of entry fees
+      const totalRevenue = finished.reduce((sum, m) => sum + (m.entryFee * 2 - m.winnings), 0) + (finished.length * 2); // default small markup
+
+      return res.json({
+        success: true,
+        onlinePlayers,
+        activeTables: activeTablesCount,
+        totalBets,
+        totalRevenue: Math.max(0, totalRevenue)
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  static async getTPHistory(req, res) {
+    try {
+      const history = await TeenPattiMatchModel.find().sort({ createdAt: -1 }).lean();
+      return res.json({ success: true, history });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
     }
   }
 }

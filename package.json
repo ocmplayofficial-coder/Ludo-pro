@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js"
+    ,"build": "echo \"no build for server\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

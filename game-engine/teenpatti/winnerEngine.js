@@ -6,34 +6,49 @@
 // 2: Pair
 // 1: High Card
 
-export function evaluateTeenPattiHand(rawCards, variant) {
+export function evaluateTeenPattiHand(rawCards, variant, jokerValue = null) {
+  if (!rawCards || rawCards.length !== 3) {
+    return { title: "Invalid Hand", strength: 0, tiebreaker: 0 };
+  }
+
   let cards = [...rawCards].sort((a, b) => b.rank - a.rank);
 
-  // AK47 Variant Wildcards Transformation logic: Aces, Kings, 4s, 7s act as wild cards
-  if (variant === 'AK47') {
-    const wildCount = cards.filter(c => ['A', 'K', '4', '7'].includes(c.value)).length;
+  // Joker wildcards logic: jokerValue acts as a wild card
+  if (variant === 'JOKER' && jokerValue) {
+    const wildCount = cards.filter(c => c.value === jokerValue).length;
     if (wildCount === 3) {
-      return { title: "🎁 AK-47 Royal Trail!", strength: 6, tiebreaker: 14 * 1000 };
+      return { title: "🎁 Joker Royal Trail!", strength: 6, tiebreaker: 14 * 1000 };
     }
     if (wildCount === 2) {
       // Best possible hand with 2 wildcards is a Trail of the remaining card
-      const normalCard = cards.find(c => !['A', 'K', '4', '7'].includes(c.value)) || { rank: 14 };
-      return { title: `🔥 Trail of ${normalCard.value || 'A'}s!`, strength: 6, tiebreaker: normalCard.rank * 1000 };
+      const normalCard = cards.find(c => c.value !== jokerValue) || { rank: 14, value: 'A' };
+      return { title: `🔥 Trail of ${normalCard.value}s!`, strength: 6, tiebreaker: normalCard.rank * 1000 };
     }
     if (wildCount === 1) {
-      // 1 wildcard can morph to make a Trail with a normal Pair, or Pure Sequence
-      const normalCards = cards.filter(c => !['A', 'K', '4', '7'].includes(c.value));
+      // 1 wildcard can morph to make a Trail with a normal Pair, or sequence/flush
+      const normalCards = cards.filter(c => c.value !== jokerValue);
       if (normalCards[0].rank === normalCards[1].rank) {
         return { title: `🔥 Trail of ${normalCards[0].value}s!`, strength: 6, tiebreaker: normalCards[0].rank * 1000 };
       }
-      // Check for Pure Sequence (diff is 1 or 2)
+      
       const diff = Math.abs(normalCards[0].rank - normalCards[1].rank);
+      const sameSuit = normalCards[0].suit === normalCards[1].suit;
+
       if (diff === 1 || diff === 2) {
-        const highVal = Math.max(normalCards[0].rank, normalCards[1].rank) + (diff === 2 ? -1 : 1);
-        return { title: "🌈 Pure Sequence", strength: 5, tiebreaker: highVal * 100 };
+        // Can form sequence (straight)
+        const highRank = Math.max(normalCards[0].rank, normalCards[1].rank) + (diff === 2 ? -1 : 1);
+        if (sameSuit) {
+          return { title: "🌈 Pure Sequence!", strength: 5, tiebreaker: highRank * 500 };
+        }
+        return { title: "🏃 Sequence (Straight)", strength: 4, tiebreaker: highRank * 250 };
       }
-      // Else make a Pair
-      return { title: `✨ Pair of ${normalCards[0].value}s`, strength: 2, tiebreaker: normalCards[0].rank * 10 };
+      
+      if (sameSuit) {
+        return { title: "🎨 Color Flush", strength: 3, tiebreaker: normalCards[0].rank * 125 };
+      }
+      
+      // Pair of the high card
+      return { title: `✨ Pair of ${normalCards[0].value}s`, strength: 2, tiebreaker: normalCards[0].rank * 100 + normalCards[1].rank };
     }
   }
 
@@ -75,23 +90,21 @@ export function evaluateTeenPattiHand(rawCards, variant) {
 
   // Muflis Model: Lowest rank hand wins
   if (variant === 'MUFLIS') {
-    // Invert the tiebreaker and strength logic
-    // Strength is inverted: High card (1) becomes highest strength (6), Trail (6) becomes lowest strength (1)
-    const originalStrength = strength;
-    strength = 7 - originalStrength;
-    tiebreaker = 10000 - tiebreaker; // Lowest card tiebreaker yields highest value
+    // Invert strength and tiebreaker
+    strength = 7 - strength;
+    tiebreaker = 10000 - tiebreaker;
     title = `📉 Muflis (${title})`;
   }
 
   return { title, strength, tiebreaker };
 }
 
-export function compareHands(handA, handB, variant) {
-  const evalA = evaluateTeenPattiHand(handA, variant);
-  const evalB = evaluateTeenPattiHand(handB, variant);
+export function compareHands(handA, handB, variant, jokerValue = null) {
+  const evalA = evaluateTeenPattiHand(handA, variant, jokerValue);
+  const evalB = evaluateTeenPattiHand(handB, variant, jokerValue);
 
   if (evalA.strength !== evalB.strength) {
-    return evalA.strength > evalB.strength ? 'player' : 'bot';
+    return evalA.strength > evalB.strength ? 'A' : 'B';
   }
-  return evalA.tiebreaker >= evalB.tiebreaker ? 'player' : 'bot';
+  return evalA.tiebreaker >= evalB.tiebreaker ? 'A' : 'B';
 }

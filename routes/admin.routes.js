@@ -2,6 +2,7 @@ import express from "express";
 import { authMiddleware } from "../middleware/auth.js";
 import { AdminController } from "../controllers/admin.controller.js";
 import { upload } from "../middleware/upload.js";
+import { WithdrawController } from "../controllers/withdraw.controller.js";
 
 console.log("AdminController =", AdminController);
 console.log("getLiveMatches =", AdminController.getLiveMatches);
@@ -82,7 +83,7 @@ router.get(
 router.post(
     "/payment-methods/add",
     authMiddleware,
-    upload.single("qrImage"),
+        upload.any(),
     AdminController.addPaymentMethod
 );
 router.get(
@@ -133,6 +134,64 @@ router.post(
     "/deposit-requests/:id/action",
     authMiddleware,
     AdminController.handleDepositRequestAction
+);
+
+// ======================
+// WITHDRAW REQUESTS
+// ======================
+router.get(
+    "/withdraws",
+    authMiddleware,
+    WithdrawController.adminList
+);
+router.get(
+    "/withdraws/:id",
+    authMiddleware,
+    WithdrawController.adminGetDetails
+);
+router.put(
+    "/withdraws/:id/approve",
+    authMiddleware,
+    WithdrawController.adminApprove
+);
+router.put(
+    "/withdraws/:id/reject",
+    authMiddleware,
+    WithdrawController.adminReject
+);
+
+// ======================
+// TEEN PATTI ADMIN MODULE
+// ======================
+router.post(
+    "/teenpatti/arenas/create",
+    authMiddleware,
+    AdminController.createTPArena
+);
+router.put(
+    "/teenpatti/arenas/:id/edit",
+    authMiddleware,
+    AdminController.editTPArena
+);
+router.delete(
+    "/teenpatti/arenas/:id/delete",
+    authMiddleware,
+    AdminController.deleteTPArena
+);
+router.get(
+    "/teenpatti/live-matches",
+    authMiddleware,
+    AdminController.getTPLiveMatches
+);
+router.get(
+    "/teenpatti/stats",
+    authMiddleware,
+    AdminController.getTPStats
+);
+router.get(
+    "/teenpatti/history",
+    authMiddleware,
+    AdminController.getTPHistory
 );
 
 export default router;

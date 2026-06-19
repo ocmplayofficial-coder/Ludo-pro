@@ -8,18 +8,33 @@ import { addTransaction, getFormattedDateTime } from '../../wallet/transaction.s
  */
 export function createLudoRoom(user, variant, entryFee) {
   const fee = parseFloat(entryFee);
-  // Validate user can afford the entry fee (but do not deduct yet)
-  if (user.walletBalance < fee) {
-    throw new Error("Insufficient wallet balance to join this Ludo room.");
-  }
+  // Note: wallet deduction/validation is handled by LudoService.matchmaking.
+  // createLudoRoom should not re-check or deduct the user's balance because
+  // the service layer performs that responsibility.
 
   // Generate a unique match ID
   const matchId = "LUDO-" + Math.floor(100000 + Math.random() * 900000);
 
-  // Prize after platform fee (₹30) – total pot will be 2 * fee, winner gets pot - fee
-  const totalPot = fee * 2;
+  // Determine winningPrize: prefer configured arena value if present,
+  // otherwise compute from entry fee (2 * fee - platformFee)
   const platformFee = 30;
-  const winningPrize = Math.max(0, totalPot - platformFee);
+  // Try to find a matching arena in the in-memory DB
+  let winningPrize = null;
+  try {
+    const arenaMatch = (db.gameArenas || []).find(a => {
+      return a.gameType === 'ludo' && String(a.mode).toUpperCase() === String(variant).toUpperCase() && Number(a.entryFee) === Number(fee);
+    });
+    if (arenaMatch && typeof arenaMatch.winningPrize !== 'undefined') {
+      winningPrize = Number(arenaMatch.winningPrize);
+    }
+  } catch (err) {
+    console.warn('Failed to resolve arena-configured winningPrize, falling back to computed prize', err);
+  }
+
+  if (winningPrize === null) {
+    const totalPot = fee * 2;
+    winningPrize = Math.max(0, totalPot - platformFee);
+  }
 
   // Initialise tokens for both colors (yellow will be opponent later)
   const tokens = [];

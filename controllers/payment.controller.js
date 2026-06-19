@@ -106,7 +106,7 @@ export class PaymentController {
            amount: parsedAmount,
            paymentMethodId: paymentMethod._id,
            upiId: paymentMethod.upiId || "",
-           qrCode: paymentMethod.qrImage ? `/uploads/${paymentMethod.qrImage}` : "",
+           qrCode: paymentMethod.qrCode ? `/uploads/${paymentMethod.qrCode}` : "",
            mode: mode
         },
         orderId: razorOrderId,

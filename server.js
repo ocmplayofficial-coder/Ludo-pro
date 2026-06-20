@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 import { connectDB } from "./config/db.js";
 import { initWebSocketServer } from "./sockets/index.js";
 import paymentRoutes from "./routes/payment.routes.js";
+import upigatewayRoutes from "./routes/upigateway.routes.js";
 
 console.log("PAYMENT ROUTES =", paymentRoutes);
 
@@ -32,7 +33,6 @@ async function startServer() {
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "http://localhost:8080",
-    "https://ocmplayy.netlify.app",
     "https://ocmplay.netlify.app",
     "http://127.0.0.1:8080"
   ];
@@ -119,6 +119,7 @@ async function startServer() {
   app.use("/api/ludo", ludoRoutes);
   app.use("/api/teenpatti", teenPattiRoutes);
   app.use("/api/payment", paymentRoutes);
+  app.use("/api/payments/upigateway", upigatewayRoutes);
   app.use("/api/referral", referralRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/payment-methods", paymentMethodRoutes);

@@ -33,6 +33,7 @@ async function startServer() {
     "http://127.0.0.1:5173",
     "http://localhost:8080",
     "https://ocmplayy.netlify.app",
+    "https://ocmplay.netlify.app",
     "http://127.0.0.1:8080"
   ];
   

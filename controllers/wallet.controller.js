@@ -3,6 +3,9 @@ import { WalletService } from '../services/wallet.service.js';
 export class WalletController {
   static getWallet(req, res) {
     try {
+
+      console.log("WalletController.getWallet - user:", req.user);
+
       return res.json({
         walletBalance: req?.user?.walletBalance?? 0,
         depositCash: req?.user?.depositBalance?? 0,

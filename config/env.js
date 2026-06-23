@@ -45,4 +45,13 @@ export const env = {
 
   APITXT_TEMPLATE_ID:
     process.env.APITXT_TEMPLATE_ID || ''
+  ,
+  // UPI Gateway
+  UPI_GATEWAY_API_URL: process.env.UPI_GATEWAY_API_URL || '',
+  UPI_GATEWAY_API_KEY: process.env.UPI_GATEWAY_API_KEY || '',
+  UPI_GATEWAY_WEBHOOK_SECRET: process.env.UPI_GATEWAY_WEBHOOK_SECRET || '',
+  // Alternate env names (used by new upigateway integration)
+  UPIGATEWAY_API_KEY: process.env.UPIGATEWAY_API_KEY || process.env.UPI_GATEWAY_API_KEY || '',
+  UPIGATEWAY_WEBHOOK_SECRET: process.env.UPIGATEWAY_WEBHOOK_SECRET || process.env.UPI_GATEWAY_WEBHOOK_SECRET || '',
+  UPIGATEWAY_WEBHOOK_HEADER: process.env.UPIGATEWAY_WEBHOOK_HEADER || process.env.UPI_GATEWAY_WEBHOOK_HEADER || 'x-upigateway-signature'
 };

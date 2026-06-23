@@ -1,43 +1,55 @@
 import express from "express";
+import { authMiddleware } from "../middleware/auth.js";
+import * as upiController from "../controllers/upigateway.controller.js";
+
 const router = express.Router();
 
-router.post("/webhook", async (req, res) => {
+// Startup debug log to confirm route file loaded
+console.log("UPIGateway routes loaded");
+
+// Log incoming requests to this router for debugging
+router.use((req, res, next) => {
   try {
-    console.log("UPIGateway Webhook:", req.body);
-    const {
-      client_txn_id,
-      amount,
-      status,
-      upi_txn_id,
-      customer_mobile,
-    } = req.body;
-
-    if (status?.toLowerCase() === "success") {
-      console.log("Payment Success:", {
-        client_txn_id,
-        amount,
-        upi_txn_id,
-      });
-      // TODO:
-      // 1. Deposit find by client_txn_id
-      // 2. Deposit status = SUCCESS
-      // 3. Wallet += amount
-      // 4. Transaction create
-    }
-
-    return res.status(200).send("OK");
-  } catch (error) {
-    console.error("Webhook Error:", error);
-    return res.status(500).send("ERROR");
-  }
+    console.log(`UPIGateway Router - ${req.method} ${req.originalUrl}`);
+  } catch (e) {}
+  next();
 });
+
+// Create order (authenticated)
+router.post("/create-order", authMiddleware, express.json(), upiController.createOrder);
+
+// Webhook: use raw body so we can verify signatures
+router.post(
+  "/webhook",
+  express.raw({ type: "application/json" }),
+  upiController.webhookHandler
+);
 
 // Test route
-router.get("/test", (req, res) => {
-  res.json({
-    success: true,
-    message: "UPIGateway webhook route working",
-  });
+router.get("/test", upiController.testRoute);
+
+// Simple debug route to verify mount and reachability
+router.get("/debug", (req, res) => {
+  res.json({ success: true, route: "upigateway" });
 });
 
+// Status check (public)
+router.get("/status/:clientTxnId", upiController.getStatus);
+
 export default router;
+
+// Log the routes defined on this router (helps detect stale deployments)
+try {
+  const defined = [];
+  if (router && router.stack) {
+    router.stack.forEach((s) => {
+      if (s.route && s.route.path) {
+        const methods = Object.keys(s.route.methods).join(',').toUpperCase();
+        defined.push({ path: s.route.path, methods });
+      }
+    });
+  }
+  console.log('UPIGateway router definitions:', defined);
+} catch (e) {
+  console.warn('Failed to print UPIGateway router definitions', e);
+}

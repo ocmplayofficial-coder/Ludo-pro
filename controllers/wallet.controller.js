@@ -4,10 +4,10 @@ export class WalletController {
   static getWallet(req, res) {
     try {
       return res.json({
-        walletBalance: req.user.walletBalance,
-        depositCash: req.user.depositBalance,
-        winningCash: req.user.winningsBalance,
-        withdrawableBalance: req.user.winningsBalance
+        walletBalance: req?.user?.walletBalance?? 0,
+        depositCash: req?.user?.depositBalance?? 0,
+        winningCash: req?.user?.winningsBalance?? 0,
+        withdrawableBalance: req?.user?.winningsBalance?? 0
       });
     } catch (err) {
       return res.status(500).json({ error: err.message });

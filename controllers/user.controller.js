@@ -10,10 +10,10 @@ export class UserController {
     }
   }
 
-  static updateProfile(req, res) {
+  static async updateProfile(req, res) {
     const { username } = req.body;
     try {
-      const updatedUser = UserService.updateProfile(req.user, username);
+      const updatedUser = await UserService.updateProfile(req.user, username);
       return res.json({ success: true, user: updatedUser });
     } catch (err) {
       return res.status(400).json({ error: err.message });

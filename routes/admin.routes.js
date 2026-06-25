@@ -83,7 +83,7 @@ router.get(
 router.post(
     "/payment-methods/add",
     authMiddleware,
-        upload.any(),
+    upload.any(),
     AdminController.addPaymentMethod
 );
 router.get(

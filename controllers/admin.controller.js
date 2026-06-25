@@ -783,15 +783,15 @@ export class AdminController {
           await user.save();
 
           // const { addTransaction } = await import("../wallet/transaction.service.js");
-              let method = "UPI Gateway";
-              try {
-                const pm = await PaymentMethodModel.findById(depositRequest.paymentMethod);
-                if (pm && pm.upiId) {
-                  method = `UPI (${pm.upiId})`;
-                }
-              } catch (e) {
-                // ignore
-              }
+          let method = "UPI Gateway";
+          try {
+            const pm = await PaymentMethodModel.findById(depositRequest.paymentMethod);
+            if (pm && pm.upiId) {
+              method = `UPI (${pm.upiId})`;
+            }
+          } catch (e) {
+            // ignore
+          }
 
           await TransactionModel.create({
             user: user._id,
@@ -909,11 +909,11 @@ export class AdminController {
       const onlinePlayers = global.onlinePlayers ? global.onlinePlayers.size : 0;
       const activeGamesList = [...db.teenPattiGames.values()].filter(g => g.status === 'PLAYING');
       const activeTablesCount = activeGamesList.length;
-      
+
       const finished = await TeenPattiMatchModel.find().lean();
-      
+
       const totalBets = finished.reduce((sum, m) => sum + m.pot, 0) + activeGamesList.reduce((sum, g) => sum + g.pot, 0);
-      
+
       // Platform keeps 10% of entry fees
       const totalRevenue = finished.reduce((sum, m) => sum + (m.entryFee * 2 - m.winnings), 0) + (finished.length * 2); // default small markup
 

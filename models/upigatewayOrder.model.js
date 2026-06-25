@@ -5,6 +5,7 @@ const upiOrderSchema = new mongoose.Schema(
     clientTxnId: { type: String, required: true, unique: true, index: true },
     user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
     amount: { type: Number, required: true },
+    txnDate: { type: Date },
     status: { type: String, enum: ["PENDING", "SUCCESS", "FAILED"], default: "PENDING" },
     gatewayTxnId: { type: String, index: true, sparse: true },
     paymentUrl: { type: String },

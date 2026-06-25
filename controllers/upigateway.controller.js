@@ -7,6 +7,7 @@ import * as upiService from "../services/upigateway.service.js";
 
 const WEBHOOK_HEADER = process.env.UPIGATEWAY_WEBHOOK_HEADER || process.env.UPI_GATEWAY_WEBHOOK_HEADER || "x-upigateway-signature";
 const WEBHOOK_SECRET = process.env.UPIGATEWAY_WEBHOOK_SECRET || process.env.UPI_GATEWAY_WEBHOOK_SECRET || null;
+const io = global.io;
 
 export async function createOrder(req, res) {
   try {
@@ -190,9 +191,17 @@ export async function webhookHandler(req, res) {
 
       const normalizedStatus = String(status || '').toLowerCase();
       if (normalizedStatus === 'success' || normalizedStatus === 'paid') {
+        // Require a gateway transaction id to consider this a real success
+        if (!upi_txn_id) {
+          console.warn('[WEBHOOK] success status received but missing upi_txn_id — ignoring to avoid false credit', { client_txn_id, body });
+          await session.commitTransaction();
+          session.endSession();
+          return res.status(200).send('OK');
+        }
+        console.log('[PAYMENT SUCCESS] webhook indicates success for', client_txn_id);
         // update order
         order.status = 'SUCCESS';
-        if (upi_txn_id) order.gatewayTxnId = upi_txn_id;
+        order.gatewayTxnId = upi_txn_id;
         order.processed = true;
         order.rawPayload = body;
         await order.save({ session });
@@ -206,26 +215,43 @@ export async function webhookHandler(req, res) {
           return res.status(200).send('OK');
         }
 
-        // Credit user wallet atomically
-        const creditedAmount = parseFloat(amount || order.amount || 0);
-        await UserModel.findByIdAndUpdate(order.user, { $inc: { walletBalance: creditedAmount } }, { session });
+        // Credit user deposit + wallet atomically (so games see depositBalance)
+        const creditedAmount = parseFloat(amount || order.amount || 0) || 0;
+        const updatedUser = await UserModel.findByIdAndUpdate(order.user, { $inc: { depositBalance: creditedAmount, walletBalance: creditedAmount } }, { session, new: true });
 
         // Create Transaction record
         await TransactionModel.create([{ transactionId: `TXN_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`, user: order.user, paymentMethod: null, type: 'DEPOSIT', amount: creditedAmount, status: 'SUCCESS', gatewayOrderId: order.gatewayTxnId, method: 'UPI Gateway' }], { session });
+        console.log('[TRANSACTION SAVED] gatewayTxnId=', order.gatewayTxnId, 'amount=', creditedAmount);
+
+        console.log('[WALLET CREDITED] user=', updatedUser?._id?.toString(), 'depositBalance=', updatedUser?.depositBalance, 'walletBalance=', updatedUser?.walletBalance);
+        // Emit socket update so frontend updates in real-time
+        try {
+          if (io && updatedUser) {
+            io.to(updatedUser._id.toString()).emit('walletUpdated', {
+              userId: updatedUser._id.toString(),
+              walletBalance: updatedUser.walletBalance,
+              depositBalance: updatedUser.depositBalance,
+              amount: creditedAmount
+            });
+          }
+        } catch (e) {
+          console.warn('Failed to emit walletUpdated socket event', e?.message || e);
+        }
 
         await session.commitTransaction();
         session.endSession();
-        console.log('Processed UPI success for', client_txn_id);
+        console.log('[PROCESSED] Processed UPI success for', client_txn_id);
         return res.status(200).send('OK');
       } else {
         // mark failed
+        console.log('[PAYMENT FAILED] webhook indicates failure for', client_txn_id);
         order.status = 'FAILED';
         order.processed = true;
         order.rawPayload = body;
         await order.save({ session });
         await session.commitTransaction();
         session.endSession();
-        console.log('Marked order failed', client_txn_id);
+        console.log('[MARKED FAILED] order', client_txn_id);
         return res.status(200).send('OK');
       }
     } catch (err) {
@@ -252,27 +278,55 @@ export async function getStatus(req, res) {
     const order = await upiService.findOrderByClientTxn(clientTxnId);
     if (!order) return res.status(404).json({ success: false, error: "Order not found" });
 
-    // If already finalized, return current status
+    // If already finalized or processed, return current status using unified shape
     if (order.status && order.status !== 'PENDING') {
-      return res.json({ success: true, status: order.status, order });
+      const paymentStatus = order.status === 'SUCCESS' ? 'SUCCESS' : (order.status === 'FAILED' ? 'FAILED' : 'PENDING');
+      const ok = paymentStatus === 'SUCCESS' || paymentStatus === 'PENDING';
+      const message = paymentStatus === 'SUCCESS' ? 'Payment Successful' : (paymentStatus === 'FAILED' ? 'Payment Failed' : 'Waiting for payment');
+      return res.json({ success: ok, paymentStatus, message, order });
     }
 
-    // Check remote gateway status
-    const statusResp = await upiService.checkGatewayOrderStatus({ clientTxnId, gatewayOrderId: order.gatewayTxnId });
-    const inner = statusResp.data || statusResp || {};
+    // If order was already processed (e.g. webhook), return its status immediately
+    if (order.processed) {
+      const paymentStatus = order.status === 'SUCCESS' ? 'SUCCESS' : (order.status === 'FAILED' ? 'FAILED' : 'SUCCESS');
+      const ok = paymentStatus === 'SUCCESS';
+      const message = paymentStatus === 'SUCCESS' ? 'Payment Successful' : 'Payment Failed';
+      return res.json({ success: ok, paymentStatus, message, order });
+    }
 
-    const remoteStatus = (inner.status || inner.order_status || inner.payment_status || '').toString().toLowerCase();
+    // Check remote gateway status — provide txnDate explicitly and parse gateway response robustly
+    const txnDateValue = order.txnDate || order.createdAt || null;
+    const statusResp = await upiService.checkGatewayOrderStatus({ clientTxnId, gatewayOrderId: order.gatewayTxnId, txnDate: txnDateValue });
 
-    if (remoteStatus === 'success' || remoteStatus === 'paid') {
+    console.log('[STATUS DEBUG]', JSON.stringify(statusResp, null, 2));
+
+    // support nested response shapes: { data: { data: { ... } } } or { data: { ... } } or top-level
+    const inner = statusResp?.data?.data || statusResp?.data || statusResp || {};
+
+    const remoteStatus = String(inner.status || inner.order_status || inner.payment_status || '').toLowerCase().trim();
+
+    // Accept scanning only when it's safe: upi_txn_id present or order already processed.
+    // NOTE: we intentionally ignore the UPIGATEWAY_ACCEPT_SCANNING env to avoid false-positives.
+    const acceptScanning = Boolean(inner.upi_txn_id) || Boolean(order.processed);
+
+    if (["success", "paid", "completed", "captured", "approved"].includes(remoteStatus) || (remoteStatus === 'scanning' && acceptScanning)) {
+      if (remoteStatus === 'scanning') console.warn('[STATUS WARNING] accepting "scanning" as success for', clientTxnId, { acceptScanning });
+      console.log('[STATUS PAYMENT SUCCESS] remote gateway reports success for', clientTxnId);
       // process success similar to webhook
       const upi_txn_id = inner.upi_txn_id || inner.transaction_id || inner.txn_id || inner.order_id || null;
+
+      // If there's no upi_txn_id, do not credit — return PENDING to the client
+      if (!upi_txn_id) {
+        console.log('[STATUS] Gateway reported success-like status but no txn id; deferring credit until txn id present', { clientTxnId, inner });
+        return res.json({ success: true, paymentStatus: 'PENDING', message: 'Waiting for payment', order });
+      }
 
       const session = await mongoose.startSession();
       session.startTransaction();
       try {
         // update order
         order.status = 'SUCCESS';
-        if (upi_txn_id) order.gatewayTxnId = upi_txn_id;
+        order.gatewayTxnId = upi_txn_id;
         order.processed = true;
         order.rawPayload = inner;
         await order.save({ session });
@@ -280,16 +334,33 @@ export async function getStatus(req, res) {
         // prevent duplicate transaction
         const existingTx = await TransactionModel.findOne({ gatewayOrderId: order.gatewayTxnId }).session(session);
         if (!existingTx) {
-          // credit wallet
-          await UserModel.findByIdAndUpdate(order.user, { $inc: { walletBalance: parseFloat(order.amount) } }, { session });
+          console.log('[STATUS] No existing transaction found; crediting user', order.user.toString());
+          // credit deposit + wallet
+          const updatedUser = await UserModel.findByIdAndUpdate(order.user, { $inc: { depositBalance: parseFloat(order.amount), walletBalance: parseFloat(order.amount) } }, { session, new: true });
 
           // create transaction
-          await TransactionModel.create([{ transactionId: `TXN_${Date.now()}_${Math.floor(Math.random()*9000+1000)}`, user: order.user, paymentMethod: null, type: 'DEPOSIT', amount: parseFloat(order.amount), status: 'SUCCESS', gatewayOrderId: order.gatewayTxnId, method: 'UPI Gateway' }], { session });
+          await TransactionModel.create([{ transactionId: `TXN_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`, user: order.user, paymentMethod: null, type: 'DEPOSIT', amount: parseFloat(order.amount), status: 'SUCCESS', gatewayOrderId: order.gatewayTxnId, method: 'UPI Gateway' }], { session });
+          console.log('[TRANSACTION SAVED] (status flow) gatewayTxnId=', order.gatewayTxnId, 'amount=', parseFloat(order.amount));
+
+          console.log('[WALLET CREDITED] (status flow) user=', updatedUser?._id?.toString(), 'depositBalance=', updatedUser?.depositBalance, 'walletBalance=', updatedUser?.walletBalance);
+          // emit socket update
+          try {
+            if (io && updatedUser) {
+              io.to(updatedUser._id.toString()).emit('walletUpdated', {
+                userId: updatedUser._id.toString(),
+                walletBalance: updatedUser.walletBalance,
+                depositBalance: updatedUser.depositBalance,
+                amount: parseFloat(order.amount)
+              });
+            }
+          } catch (e) {
+            console.warn('Failed to emit walletUpdated on status success', e?.message || e);
+          }
         }
 
         await session.commitTransaction();
         session.endSession();
-        return res.json({ success: true, status: 'SUCCESS', order });
+        return res.json({ success: true, paymentStatus: 'SUCCESS', message: 'Payment Successful', order });
       } catch (err) {
         await session.abortTransaction();
         session.endSession();
@@ -300,11 +371,11 @@ export async function getStatus(req, res) {
 
     if (remoteStatus === 'failed' || remoteStatus === 'cancelled') {
       await upiService.markOrderProcessed(order._id, { status: 'FAILED', processed: true, rawPayload: inner });
-      return res.json({ success: true, status: 'FAILED', order });
+      return res.json({ success: false, paymentStatus: 'FAILED', message: 'Payment Failed', order });
     }
 
     // otherwise still pending
-    return res.json({ success: true, status: 'PENDING', order });
+    return res.json({ success: true, paymentStatus: 'PENDING', message: 'Waiting for payment', order });
   } catch (error) {
     console.error('getStatus error:', error);
     return res.status(500).json({ success: false, error: 'Server error' });

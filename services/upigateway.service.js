@@ -1,4 +1,5 @@
 import axios from "axios";
+import dayjs from "dayjs";
 import { UpigatewayOrderModel } from "../models/upigatewayOrder.model.js";
 import { UserModel } from "../models/user.model.js";
 
@@ -98,6 +99,7 @@ export async function createGatewayOrder({ clientTxnId, amount, userId, customer
   }
 
   console.log("FINAL GATEWAY PAYLOAD");
+  console.log('[PAYMENT CREATED]');
   console.log(JSON.stringify({ url: CREATE_ORDER_URL, payload: { ...payload, key: payload.key ? '****' : '' } }, null, 2));
 
   try {
@@ -109,8 +111,8 @@ export async function createGatewayOrder({ clientTxnId, amount, userId, customer
     // Attempt to locate payment URL or QR in various shapes
     const { paymentUrl, qr } = extractPaymentUrlFromResponse(data) || { paymentUrl: null, qr: null };
 
-    console.log('Extracted paymentUrl:', paymentUrl);
-    console.log('Extracted qr:', qr);
+    console.log('[GATEWAY RESPONSE] Extracted paymentUrl:', paymentUrl);
+    console.log('[GATEWAY RESPONSE] Extracted qr:', qr);
 
     // Try to find gateway order id
     const gatewayOrderId = data.order_id || data.orderId || (data.data && (data.data.order_id || data.data.orderId)) || null;
@@ -142,18 +144,41 @@ export async function createGatewayOrder({ clientTxnId, amount, userId, customer
   }
 }
 
-export async function checkGatewayOrderStatus({ clientTxnId, gatewayOrderId }) {
+export async function checkGatewayOrderStatus({ clientTxnId, gatewayOrderId, txnDate = null }) {
+  // Always include both identifiers if available — some gateways require client_txn_id
   const payload = { key: API_KEY };
+  if (clientTxnId) payload.client_txn_id = clientTxnId;
   if (gatewayOrderId) payload.order_id = gatewayOrderId;
-  else if (clientTxnId) payload.client_txn_id = clientTxnId;
 
-  console.log("UPI check_order_status payload:", payload);
+  // If txnDate not provided, try to fetch order createdAt from DB using clientTxnId
+  try {
+    if (!txnDate && clientTxnId) {
+      const order = await UpigatewayOrderModel.findOne({ clientTxnId }).lean();
+      if (order) {
+        // prefer explicit txnDate field if present, otherwise use createdAt
+        txnDate = order.txnDate || order.createdAt || null;
+      }
+    }
+
+    if (txnDate) {
+      // format according to gateway expectations (DD-MM-YYYY)
+      try {
+        payload.txn_date = dayjs(txnDate).format("DD-MM-YYYY");
+      } catch (e) {
+        console.warn('[STATUS CHECK] failed to format txnDate:', txnDate, e.message || e);
+      }
+    }
+  } catch (e) {
+    console.warn('[STATUS CHECK] could not load order for txn_date:', e.message || e);
+  }
+
+  console.log('[STATUS CHECK] UPI check_order_status payload:', payload);
   try {
     const resp = await axios.post(CHECK_STATUS_URL, payload, { headers: { "Content-Type": "application/json" }, timeout: 10000 });
-    console.log("UPI check_order_status response:", resp.data);
+    console.log('[STATUS CHECK] UPI check_order_status response:', resp.data);
     return resp.data;
   } catch (err) {
-    console.error("UPI check_order_status error:", err.response?.data || err.message || err);
+    console.error('[STATUS CHECK] UPI check_order_status error:', err.response?.data || err.message || err);
     throw err;
   }
 }
@@ -163,6 +188,7 @@ export async function createLocalOrder({ clientTxnId, userId, amount }) {
     clientTxnId,
     user: userId,
     amount,
+    txnDate: new Date(),
     status: "PENDING",
   });
 

@@ -5,10 +5,23 @@ export class UserService {
     return user;
   }
 
-  static updateProfile(user, username) {
+  static async updateProfile(user, username) {
     if (username && username.trim() !== "") {
-      user.username = username.trim();
-      user.avatar = username.trim()[0].toUpperCase();
+      const clean = username.trim();
+      // If user is a Mongoose document, mutate and save
+      try {
+        user.username = clean;
+        user.avatar = clean[0].toUpperCase();
+        if (typeof user.save === 'function') {
+          const saved = await user.save();
+          return saved;
+        }
+      } catch (e) {
+        // fallback for non-mongoose user object
+        user.username = clean;
+        user.avatar = clean[0].toUpperCase();
+        return user;
+      }
     }
     return user;
   }

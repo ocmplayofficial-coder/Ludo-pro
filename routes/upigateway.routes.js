@@ -11,17 +11,17 @@ console.log("UPIGateway routes loaded");
 router.use((req, res, next) => {
   try {
     console.log(`UPIGateway Router - ${req.method} ${req.originalUrl}`);
-  } catch (e) {}
+  } catch (e) { }
   next();
 });
 
 // Create order (authenticated)
 router.post("/create-order", authMiddleware, express.json(), upiController.createOrder);
 
-// Webhook: use raw body so we can verify signatures
+// Webhook: accept any content-type as raw so we can verify signatures and parse flexibly
 router.post(
   "/webhook",
-  express.raw({ type: "application/json" }),
+  express.raw({ type: "*/*" }),
   upiController.webhookHandler
 );
 

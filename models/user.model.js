@@ -20,6 +20,8 @@ const userSchema = new mongoose.Schema(
     wins: { type: Number, default: 0 },
     earnings: { type: Number, default: 0 },
     referralCount: { type: Number, default: 0 },
+    referralRewardGiven: { type: Boolean, default: false },
+    rewardProcessedAt: { type: Date },
     notifications: {
       type: [
         {

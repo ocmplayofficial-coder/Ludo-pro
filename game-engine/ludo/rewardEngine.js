@@ -11,7 +11,7 @@ export async function awardWinner(user, prize, variant) {
     amount: prize,
     status: "SUCCESS",
     method: `Ludo Arena Win (${variant})`
-  });
+  }, user);
 
   try {
     if (typeof user.save === 'function') {

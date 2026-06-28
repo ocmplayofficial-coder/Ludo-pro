@@ -16,13 +16,21 @@ export function convertWinnings(user, amount) {
   user.depositBalance += totalAdded;
   user.walletBalance += bonusAmount; // Net increase in wallet balance by the 3% bonus
 
-  const tx = addTransaction({
+  const convertTx = addTransaction({
     id: "CONV" + Math.floor(1000 + Math.random() * 9000),
+    type: "CONVERT",
+    amount: convAmt,
+    status: "SUCCESS",
+    method: "Winning Cash Converted to Deposit Balance"
+  }, user);
+
+  const bonusTx = addTransaction({
+    id: "BNS" + Math.floor(1000 + Math.random() * 9000),
     type: "BONUS",
     amount: bonusAmount,
     status: "SUCCESS",
     method: "3% Winnings Convert Bonus"
-  });
+  }, user);
 
-  return tx;
+  return [convertTx, bonusTx];
 }

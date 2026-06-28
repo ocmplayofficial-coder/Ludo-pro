@@ -55,7 +55,7 @@ async function finishGameAndAward(game, winnerColor) {
         await redUser.save();
         try {
           const { addTransaction } = await import('../wallet/transaction.service.js');
-          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` });
+          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` }, redUser);
         } catch (err) { }
       }
       if (yellowUser) {
@@ -65,7 +65,7 @@ async function finishGameAndAward(game, winnerColor) {
         await yellowUser.save();
         try {
           const { addTransaction } = await import('../wallet/transaction.service.js');
-          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` });
+          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` }, yellowUser);
         } catch (err) { }
       }
     }
@@ -180,7 +180,7 @@ export class LudoService {
     // Record transaction
     try {
       const { addTransaction } = await import('../wallet/transaction.service.js');
-      addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${variant})` });
+      addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${variant})` }, user);
     } catch (err) {
       console.warn('Failed to record matchmaking transaction', err);
     }
@@ -289,7 +289,7 @@ export class LudoService {
           try { await user.save(); } catch (err) { console.warn('Refund save failed', err); }
           try {
             const { addTransaction } = await import('../wallet/transaction.service.js');
-            addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${variant})` });
+            addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${variant})` }, user);
           } catch (err) { console.warn('Refund txn failed', err); }
 
           console.log('MATCHMAKING_REFUND_ISSUED', { user: userIdStr, fee, matchId: game.matchId });
@@ -523,7 +523,7 @@ export class LudoService {
         // Record transaction
         try {
           const { addTransaction } = await import('../wallet/transaction.service.js');
-          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` });
+          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
         } catch (err) {
           console.warn('Failed to add transaction for matchmaking cancellation refund', err);
         }

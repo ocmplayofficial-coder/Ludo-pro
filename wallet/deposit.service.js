@@ -14,7 +14,7 @@ export function depositFunds(user, amount, method) {
     amount: depAmt,
     status: "SUCCESS",
     method: method || "UPI Gateway"
-  });
+  }, user);
 
   return tx;
 }

@@ -5,7 +5,7 @@ const transactionSchema = new mongoose.Schema({
   transactionId: { type: String, unique: true, required: true, index: true },
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   paymentMethod: { type: mongoose.Schema.Types.ObjectId, ref: "PaymentMethod" },
-  type: { type: String, enum: ["DEPOSIT", "WITHDRAW", "CONVERT"], required: true },
+  type: { type: String, enum: ["DEPOSIT", "WITHDRAW", "CONVERT", "WINNINGS", "BONUS", "ENTRY_FEE", "REFUND"], required: true },
   amount: { type: Number, required: true },
   status: { type: String, enum: ["PENDING", "SUCCESS", "FAILED", "APPROVED", "REJECTED"], default: "PENDING" },
   gatewayOrderId: { type: String, unique: true, sparse: true },

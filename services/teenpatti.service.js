@@ -81,8 +81,8 @@ export class TeenPattiService {
         type: 'ENTRY_FEE',
         amount: fee,
         status: 'SUCCESS',
-        method: `Teen Patti Matchmaking (${variant})`
-      });
+        method: `TeenPatti Matchmaking (${variant})`
+      }, user);
     } catch (err) {
       console.warn('Failed to record TP matchmaking transaction', err);
     }
@@ -233,8 +233,8 @@ export class TeenPattiService {
               type: 'REFUND',
               amount: fee,
               status: 'SUCCESS',
-              method: `Teen Patti Matchmaking Refund`
-            });
+              method: `TeenPatti Draw Refund`
+            }, u);
           }
           db.teenPattiGames.delete(matchId);
           console.log('TP_MATCHMAKING_REFUND_ISSUED', { userIdStr, matchId });
@@ -286,8 +286,8 @@ export class TeenPattiService {
           type: 'REFUND',
           amount: fee,
           status: 'SUCCESS',
-          method: `Teen Patti Matchmaking Cancelled`
-        });
+          method: `TeenPatti Match Cancelled`
+        }, user);
 
         return { success: true, refunded: fee };
       }
@@ -457,8 +457,8 @@ export class TeenPattiService {
           type: "WINNINGS",
           amount: game.pot,
           status: "SUCCESS",
-          method: `Teen Patti Winnings (${game.variant})`
-        });
+          method: `TeenPatti Win (${game.variant})`
+        }, winnerUser);
       }
 
       if (loserUser) {

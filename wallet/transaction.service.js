@@ -14,7 +14,7 @@ export function getTransactions() {
   return db.transactions;
 }
 
-export function addTransaction(tx) {
+export function addTransaction(tx, user = null) {
   const newTx = {
     id: tx.id || "TXN" + Math.floor(1000 + Math.random() * 9000),
     type: tx.type,
@@ -24,5 +24,19 @@ export function addTransaction(tx) {
     method: tx.method
   };
   db.transactions.unshift(newTx);
+
+  if (user && user._id) {
+    import('../models/transaction.model.js').then(({ TransactionModel }) => {
+      TransactionModel.create({
+        transactionId: newTx.id,
+        user: user._id,
+        type: newTx.type,
+        amount: newTx.amount,
+        status: newTx.status,
+        method: newTx.method
+      }).catch(err => console.warn('Failed to save tx to db:', err));
+    }).catch(err => console.warn('Failed to load tx model:', err));
+  }
+
   return newTx;
 }

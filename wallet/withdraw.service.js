@@ -17,7 +17,7 @@ export function requestWithdrawal(user, amount, method) {
     amount: withdrawAmt,
     status: "PENDING",
     method: method || "UPI (paytm@upi)"
-  });
+  }, user);
 
   return tx;
 }

@@ -19,9 +19,7 @@ export const WithdrawController = {
         accountNumber,
         confirmAccountNumber,
         ifscCode,
-        bankName,
-        branchName,
-        mobileNumber
+        bankName
       } = req.body;
 
       const numericAmount = Number(amount);
@@ -92,21 +90,26 @@ export const WithdrawController = {
         if (!bankName || bankName.trim().length === 0) {
           return res.status(400).json({ success: false, message: "Bank Name is required." });
         }
-        if (!branchName || branchName.trim().length === 0) {
-          return res.status(400).json({ success: false, message: "Branch Name is required." });
-        }
-        if (!mobileNumber || mobileNumber.trim().length === 0) {
-          return res.status(400).json({ success: false, message: "Mobile Number is required." });
-        }
 
         requestPayload.accountNumber = accountNumber.trim();
         requestPayload.ifscCode = ifscCode.toUpperCase().trim();
         requestPayload.bankName = bankName.trim();
-        requestPayload.branchName = branchName.trim();
-        requestPayload.mobileNumber = mobileNumber.trim();
       }
 
       const withdrawRequest = await WithdrawRequestModel.create(requestPayload);
+
+      const txMethod = withdrawRequest.method === "UPI" 
+        ? `UPI (${withdrawRequest.upiId})` 
+        : `Bank (${withdrawRequest.bankName} - ...${withdrawRequest.accountNumber?.slice(-4)})`;
+
+      await TransactionModel.create({
+        transactionId: `WTH-${withdrawRequest._id.toString()}`,
+        user: user._id,
+        type: "WITHDRAW",
+        amount: numericAmount,
+        status: "PENDING",
+        method: txMethod
+      });
 
       // Add a PENDING notification inside user document
       const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
@@ -260,22 +263,12 @@ export const WithdrawController = {
       withdraw.approvedAt = new Date();
       await withdraw.save({ session });
 
-      // Create transaction log
-      const transactionId = `TXN-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
-      const txMethod = withdraw.method === "UPI" 
-        ? `UPI (${withdraw.upiId})` 
-        : `Bank (${withdraw.bankName} - ...${withdraw.accountNumber?.slice(-4)})`;
-
-      await TransactionModel.create([
-        {
-          transactionId,
-          user: user._id,
-          type: "WITHDRAW",
-          amount: withdraw.amount,
-          status: "SUCCESS",
-          method: txMethod
-        }
-      ], { session });
+      // Update existing transaction log
+      await TransactionModel.findOneAndUpdate(
+        { transactionId: `WTH-${withdraw._id.toString()}` },
+        { status: "SUCCESS" },
+        { session }
+      );
 
       await session.commitTransaction();
       session.endSession();
@@ -340,15 +333,21 @@ export const WithdrawController = {
         });
         await user.save();
 
-        // Emit live update to client
-        if (global.ludoNamespace) {
-          const userRoom = user._id.toString();
-          global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
-            type: "REJECTED",
-            message: `Your withdrawal request of ₹${withdraw.amount} has been REJECTED. Reason: ${remarks}`
-          });
+          // Emit live update to client
+          if (global.ludoNamespace) {
+            const userRoom = user._id.toString();
+            global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
+              type: "REJECTED",
+              message: `Your withdrawal request of ₹${withdraw.amount} has been REJECTED. Reason: ${remarks}`
+            });
+          }
         }
-      }
+
+      // Update existing transaction log
+      await TransactionModel.findOneAndUpdate(
+        { transactionId: `WTH-${withdraw._id.toString()}` },
+        { status: "REJECTED" }
+      );
 
       return res.json({ success: true, withdraw });
     } catch (err) {

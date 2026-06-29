@@ -36,7 +36,6 @@ export function handleLudoSocket(ludoNamespace) {
       // Compute player color for this socket and opponent
       const redId = game.players?.red?.userId ? game.players.red.userId.toString() : null;
       const yellowId = game.players?.yellow?.userId ? game.players.yellow.userId.toString() : null;
-      const socketUserId = socket.user?._id?.toString();
       const playerColor = (socketUserId === redId) ? 'red' : 'yellow';
       socket.data.playerColor = playerColor;
 

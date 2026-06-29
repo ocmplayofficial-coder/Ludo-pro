@@ -2,6 +2,71 @@ import { db } from '../config/db.js';
 import { UserModel } from '../models/user.model.js';
 import { LudoService } from '../services/ludo.service.js';
 
+function getPendingLudoGameForUser(userId) {
+  if (!userId) return null;
+
+  for (const game of db.ludoGames.values()) {
+    if (!game || !game.players) continue;
+
+    const redId = game.players.red?.userId?.toString?.();
+    const yellowId = game.players.yellow?.userId?.toString?.();
+    const isRed = userId === redId;
+    const isYellow = userId === yellowId;
+
+    if (game.status === 'PLAYING_PENDING' && (isRed || isYellow)) {
+      return game;
+    }
+
+    if (game.status === 'MATCHMAKING' && isRed) {
+      return game;
+    }
+  }
+
+  return null;
+}
+
+function tryAutoJoinPendingMatch(socket, ludoNamespace) {
+  const userId = socket.user?._id?.toString();
+  if (!userId) return;
+
+  const game = getPendingLudoGameForUser(userId);
+  if (!game) return;
+
+  const matchId = game.matchId;
+  if (!matchId) return;
+
+  const room = ludoNamespace.adapter.rooms.get(matchId);
+  if (room && room.has(socket.id)) {
+    return;
+  }
+
+  console.log('AUTO_JOIN_PENDING_GAME', { socketId: socket.id, userId, matchId, status: game.status });
+  socket.join(matchId);
+
+  const playerColor = socket.user?._id?.toString() === game.players.red?.userId?.toString() ? 'red' : 'yellow';
+  socket.data.playerColor = playerColor;
+
+  const joinedPayload = {
+    playerId: userId,
+    players: game.players,
+    roomId: matchId
+  };
+
+  socket.emit('PLAYER_JOINED', joinedPayload);
+  socket.emit('GAME_UPDATE', game);
+  socket.emit('MATCH_FOUND', { roomId: matchId, players: game.players });
+
+  if (game.status === 'PLAYING' || game.started) {
+    const startPayload = {
+      currentTurn: game.turn,
+      currentPlayerId: game.turn === 'red' ? game.players.red?.userId?.toString() : game.players.yellow?.userId?.toString(),
+      players: game.players,
+      roomId: matchId
+    };
+    socket.emit('GAME_STARTED', startPayload);
+  }
+}
+
 export function handleLudoSocket(ludoNamespace) {
   ludoNamespace.on('connection', (socket) => {
     const userId = socket.user?._id?.toString();
@@ -9,6 +74,7 @@ export function handleLudoSocket(ludoNamespace) {
     if (userId) {
       socket.join(userId);
       console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
+      tryAutoJoinPendingMatch(socket, ludoNamespace);
     }
 
     socket.on('JOIN_GAME', (data) => {

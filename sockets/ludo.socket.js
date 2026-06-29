@@ -13,17 +13,23 @@ export function handleLudoSocket(ludoNamespace) {
 
     socket.on('JOIN_GAME', (data) => {
       const { matchId } = data;
-      console.log('JOIN_GAME_RECEIVED', socket.user?._id?.toString(), matchId);
+      const socketUserId = socket.user?._id?.toString();
+      console.log('JOIN_GAME_RECEIVED', { socketId: socket.id, socketUserId, matchId });
+
+      if (!matchId) {
+        console.warn('JOIN_GAME: no matchId provided', { socketId: socket.id, socketUserId, data });
+        return;
+      }
+
       socket.join(matchId);
       console.log("SOCKET_JOINED", { socketId: socket.id, matchId });
 
-      // Immediately log the room members after join (diagnostic)
       const roomAfterJoin = ludoNamespace.adapter.rooms.get(matchId);
-      console.log('ROOM_AFTER_JOIN', matchId, roomAfterJoin ? [...roomAfterJoin] : []);
+      console.log('ROOM_AFTER_JOIN', { matchId, members: roomAfterJoin ? [...roomAfterJoin] : [] });
 
       const game = db.ludoGames.get(matchId);
       if (!game) {
-        console.log("JOIN_GAME: game not found for", matchId);
+        console.warn("JOIN_GAME: game not found for", { matchId, socketId: socket.id, socketUserId });
         return;
       }
 

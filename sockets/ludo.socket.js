@@ -32,6 +32,10 @@ export function handleLudoSocket(ludoNamespace) {
         console.warn("JOIN_GAME: game not found for", { matchId, socketId: socket.id, socketUserId });
         return;
       }
+      
+      if (!game.status || game.status === 'MATCHMAKING') {
+        game.status = 'PLAYING_PENDING';
+      }
 
       // Compute player color for this socket and opponent
       const redId = game.players?.red?.userId ? game.players.red.userId.toString() : null;
@@ -51,23 +55,18 @@ export function handleLudoSocket(ludoNamespace) {
       const roomSize = roomAfter ? roomAfter.size : 0;
       // Use room membership as the authoritative indicator that two clients are present
       const bothPlayersJoined = roomSize >= 2;
-      // Store a room-derived joined flag on the game for server-side logic
       game.bothPlayersJoined = bothPlayersJoined;
       console.log("PLAYERS_JOINED_STATUS", { matchId, bothPlayersJoined, roomSize });
 
-      // Notify room that a player joined
       const joinedPayload = {
         playerId: socketUserId,
         players: game.players,
         roomId: matchId
       };
       console.log('EMITTING TO ROOM (PLAYER_JOINED)', matchId);
-      const roomBeforeEmit = ludoNamespace.adapter.rooms.get(matchId);
-      console.log('ROOM_MEMBERS', matchId, roomBeforeEmit ? [...roomBeforeEmit] : []);
       ludoNamespace.to(matchId).emit('PLAYER_JOINED', joinedPayload);
       console.log('PLAYER_JOINED_EMITTED', { matchId, payload: joinedPayload });
 
-      // Also send the joining socket an immediate sync in case it missed prior broadcasts
       try {
         socket.emit('PLAYER_JOINED', joinedPayload);
         socket.emit('GAME_UPDATE', game);
@@ -121,18 +120,20 @@ export function handleLudoSocket(ludoNamespace) {
         console.log('EMITTING TO ROOM (GAME_UPDATE)', matchId);
         ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
         console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'GAME_STARTED/GAME_UPDATE' });
-      } else {
-        // Player joined after game already started or after both players were present
-        // Ensure the early joiner receives opponent info
-        console.log('EMITTING TO ROOM (MATCH_FOUND) (late joiner)', matchId);
-        const roomBeforeLateMatchFound = ludoNamespace.adapter.rooms.get(matchId);
-        console.log('ROOM_MEMBERS', matchId, roomBeforeLateMatchFound ? [...roomBeforeLateMatchFound] : []);
+      } else if (game.status === 'PLAYING_PENDING') {
+        console.log('EMITTING TO ROOM (MATCH_FOUND) (pending)', matchId);
         ludoNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('MATCH_FOUND_EMITTED (late joiner)', { matchId });
-        // Still waiting for opponent — emit only GAME_UPDATE (pending)
+        console.log('MATCH_FOUND_EMITTED (pending)', { matchId });
         console.log('EMITTING TO ROOM (GAME_UPDATE) (pending)', matchId);
         ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
         console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'PENDING_GAME_UPDATE' });
+      } else {
+        console.log('EMITTING TO ROOM (MATCH_FOUND) (late joiner)', matchId);
+        ludoNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
+        console.log('MATCH_FOUND_EMITTED (late joiner)', { matchId });
+        console.log('EMITTING TO ROOM (GAME_UPDATE) (late joiner)', matchId);
+        ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
+        console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'LATE_JOINER_GAME_UPDATE' });
       }
     });
 

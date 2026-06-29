@@ -283,8 +283,12 @@ export class LudoService {
         });
 
         if (global.ludoNamespace) {
-          console.log('EMITTING GAME_UPDATE (PENDING) to room:', game.matchId);
+          console.log('EMITTING GAME_UPDATE and MATCH_FOUND to waiting players:', game.matchId);
           global.ludoNamespace.to(game.matchId).emit('GAME_UPDATE', game);
+          global.ludoNamespace.to(waiting.user._id.toString()).emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
+          global.ludoNamespace.to(userIdStr).emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
+          global.ludoNamespace.to(waiting.user._id.toString()).emit('GAME_UPDATE', game);
+          global.ludoNamespace.to(userIdStr).emit('GAME_UPDATE', game);
         }
 
         return game;

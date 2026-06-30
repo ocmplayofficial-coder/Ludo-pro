@@ -36,6 +36,9 @@ router.get("/debug", (req, res) => {
 // Status check (public)
 router.get("/status/:clientTxnId", upiController.getStatus);
 
+// Cancel order (authenticated)
+router.post("/cancel/:clientTxnId", authMiddleware, upiController.cancelOrder);
+
 export default router;
 
 // Log the routes defined on this router (helps detect stale deployments)

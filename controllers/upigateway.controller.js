@@ -182,8 +182,8 @@ export async function webhookHandler(req, res) {
         return res.status(200).send('OK');
       }
 
-      if (order.processed) {
-        console.log('Order already processed', client_txn_id);
+      if (order.processed && order.status === 'SUCCESS') {
+        console.log('Order already processed as SUCCESS', client_txn_id);
         await session.commitTransaction();
         session.endSession();
         return res.status(200).send('OK');
@@ -286,12 +286,16 @@ export async function getStatus(req, res) {
       return res.json({ success: ok, paymentStatus, message, order });
     }
 
-    // If order was already processed (e.g. webhook), return its status immediately
-    if (order.processed) {
-      const paymentStatus = order.status === 'SUCCESS' ? 'SUCCESS' : (order.status === 'FAILED' ? 'FAILED' : 'SUCCESS');
+    // If order was already processed with SUCCESS/FAILED/CANCELLED, return its status immediately.
+    // If CANCELLED, we still check remote gateway just in case it actually succeeded.
+    if (order.processed && order.status !== 'CANCELLED') {
+      const paymentStatus = order.status;
       const ok = paymentStatus === 'SUCCESS';
-      const message = paymentStatus === 'SUCCESS' ? 'Payment Successful' : 'Payment Failed';
+      const message = paymentStatus === 'SUCCESS' ? 'Payment Successful' : (paymentStatus === 'CANCELLED' ? 'Payment Cancelled' : 'Payment Failed');
       return res.json({ success: ok, paymentStatus, message, order });
+    }
+    if (order.processed && order.status === 'CANCELLED') {
+       // We'll check the gateway, but if gateway is pending/failed, we return CANCELLED
     }
 
     // Check remote gateway status — provide txnDate explicitly and parse gateway response robustly
@@ -374,10 +378,33 @@ export async function getStatus(req, res) {
       return res.json({ success: false, paymentStatus: 'FAILED', message: 'Payment Failed', order });
     }
 
+    // if order was marked CANCELLED locally but gateway is still pending, return CANCELLED
+    if (order.status === 'CANCELLED') {
+       return res.json({ success: false, paymentStatus: 'CANCELLED', message: 'Payment Cancelled', order });
+    }
+
     // otherwise still pending
     return res.json({ success: true, paymentStatus: 'PENDING', message: 'Waiting for payment', order });
   } catch (error) {
     console.error('getStatus error:', error);
+    return res.status(500).json({ success: false, error: 'Server error' });
+  }
+}
+
+export async function cancelOrder(req, res) {
+  try {
+    const clientTxnId = req.params.clientTxnId;
+    if (!clientTxnId) return res.status(400).json({ success: false, error: "Missing clientTxnId" });
+
+    const order = await upiService.findOrderByClientTxn(clientTxnId);
+    if (!order) return res.status(404).json({ success: false, error: "Order not found" });
+
+    if (order.status === 'PENDING') {
+      await upiService.markOrderProcessed(order._id, { status: 'CANCELLED', processed: true });
+    }
+    return res.json({ success: true, message: "Order cancelled" });
+  } catch (error) {
+    console.error('cancelOrder error:', error);
     return res.status(500).json({ success: false, error: 'Server error' });
   }
 }

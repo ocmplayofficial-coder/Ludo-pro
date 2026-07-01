@@ -100,8 +100,12 @@ export class TeenPattiService {
         const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
         if (idx !== -1) {
           q.splice(idx, 1);
-          if (q.length === 0) global.__tpQueue.delete(k);
-          else global.__tpQueue.set(k, q);
+        if (q.length === 0) {
+          global.__tpQueue.delete(k);
+        } else {
+          global.__tpQueue.set(k, q);
+        }
+        broadcastTPQueueUpdate(k);
         }
       }
     }
@@ -113,8 +117,12 @@ export class TeenPattiService {
     if (waitingIndex !== -1) {
       const waiting = queue[waitingIndex];
       queue.splice(waitingIndex, 1);
-      if (queue.length === 0) global.__tpQueue.delete(queueKey);
-      else global.__tpQueue.set(queueKey, queue);
+      if (queue.length === 0) {
+        global.__tpQueue.delete(queueKey);
+      } else {
+        global.__tpQueue.set(queueKey, queue);
+      }
+      broadcastTPQueueUpdate(queueKey);
 
       // Clear refund timer for matched opponent
       const timerKey = waiting.game.matchId;
@@ -212,6 +220,7 @@ export class TeenPattiService {
     const freshQueue = global.__tpQueue.get(queueKey) || [];
     freshQueue.push({ user, game });
     global.__tpQueue.set(queueKey, freshQueue);
+    broadcastTPQueueUpdate(queueKey);
 
     // Refund timeout
     const refundTimeout = setTimeout(async () => {
@@ -220,8 +229,12 @@ export class TeenPattiService {
         const idx = q.findIndex(item => item.user._id.toString() === userIdStr && item.game.matchId === matchId);
         if (idx !== -1) {
           q.splice(idx, 1);
-          if (q.length === 0) global.__tpQueue.delete(queueKey);
-          else global.__tpQueue.set(queueKey, q);
+          if (q.length === 0) {
+            global.__tpQueue.delete(queueKey);
+          } else {
+            global.__tpQueue.set(queueKey, q);
+          }
+          broadcastTPQueueUpdate(queueKey);
 
           // Refund user
           const u = await UserModel.findById(userIdStr);
@@ -267,8 +280,12 @@ export class TeenPattiService {
         const matchId = item.game.matchId;
 
         queue.splice(idx, 1);
-        if (queue.length === 0) global.__tpQueue.delete(queueKey);
-        else global.__tpQueue.set(queueKey, queue);
+        if (queue.length === 0) {
+          global.__tpQueue.delete(queueKey);
+        } else {
+          global.__tpQueue.set(queueKey, queue);
+        }
+        broadcastTPQueueUpdate(queueKey);
 
         const refundTimer = global.__tpRefunds.get(matchId);
         if (refundTimer) {

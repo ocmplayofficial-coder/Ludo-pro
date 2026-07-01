@@ -1,16 +1,17 @@
 import { WalletService } from '../services/wallet.service.js';
 
 export class WalletController {
-  static getWallet(req, res) {
+  static async getWallet(req, res) {
     try {
-
-      console.log("WalletController.getWallet - user:", req.user);
+      const dbWinnings = req?.user?.winningsBalance ?? 0;
+      const dbDeposit = req?.user?.depositBalance ?? 0;
+      const dbWallet = dbDeposit + dbWinnings;
 
       return res.json({
-        walletBalance: req?.user?.walletBalance?? 0,
-        depositCash: req?.user?.depositBalance?? 0,
-        winningCash: req?.user?.winningsBalance?? 0,
-        withdrawableBalance: req?.user?.winningsBalance?? 0
+        walletBalance: dbWallet,
+        depositCash: dbDeposit,
+        winningCash: dbWinnings,
+        withdrawableBalance: dbWinnings
       });
     } catch (err) {
       return res.status(500).json({ error: err.message });

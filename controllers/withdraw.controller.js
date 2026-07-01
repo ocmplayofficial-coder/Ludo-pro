@@ -111,6 +111,10 @@ export const WithdrawController = {
         method: txMethod
       });
 
+      // Physically deduct the amount from winnings immediately
+      user.winningsBalance = Math.max(0, (user.winningsBalance || 0) - numericAmount);
+      user.walletBalance = (user.depositBalance || 0) + user.winningsBalance;
+
       // Add a PENDING notification inside user document
       const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
       user.notifications.push({
@@ -120,6 +124,17 @@ export const WithdrawController = {
         createdAt: new Date()
       });
       await user.save();
+
+      // Emit live updates to `/ludo` namespace user room
+      if (global.ludoNamespace) {
+        const userRoom = user._id.toString();
+        
+        global.ludoNamespace.to(userRoom).emit("walletUpdated", {
+          depositBalance: user.depositBalance || 0,
+          winningsBalance: user.winningsBalance || 0,
+          walletBalance: user.walletBalance || 0
+        });
+      }
 
       return res.status(201).json({ success: true, withdrawRequest });
     } catch (err) {
@@ -235,19 +250,7 @@ export const WithdrawController = {
         return res.status(404).json({ success: false, message: "User associated with this request not found." });
       }
 
-      // Verify user has sufficient winnings balance at the moment of approval
-      if (withdraw.amount > (user.winningsBalance || 0)) {
-        await session.abortTransaction();
-        session.endSession();
-        return res.status(400).json({
-          success: false,
-          message: `User's balance has changed. Winnings balance (₹${user.winningsBalance}) is insufficient to cover this withdrawal (₹${withdraw.amount}).`
-        });
-      }
-
-      // Deduct from winnings
-      user.winningsBalance -= withdraw.amount;
-      user.walletBalance = (user.depositBalance || 0) + user.winningsBalance;
+      // Amount was ALREADY physically deducted upon creation, so NO NEED to deduct here again!
 
       const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
       user.notifications.push({
@@ -276,10 +279,11 @@ export const WithdrawController = {
       // Emit live updates to `/ludo` namespace user room
       if (global.ludoNamespace) {
         const userRoom = user._id.toString();
+
         global.ludoNamespace.to(userRoom).emit("walletUpdated", {
-          depositBalance: user.depositBalance,
-          winningsBalance: user.winningsBalance,
-          walletBalance: user.walletBalance
+          depositBalance: user.depositBalance || 0,
+          winningsBalance: user.winningsBalance || 0,
+          walletBalance: user.walletBalance || 0
         });
 
         global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
@@ -324,6 +328,10 @@ export const WithdrawController = {
 
       const user = await UserModel.findById(withdraw.userId);
       if (user) {
+        // Refund the amount since it was physically deducted on request creation
+        user.winningsBalance = (user.winningsBalance || 0) + withdraw.amount;
+        user.walletBalance = (user.depositBalance || 0) + user.winningsBalance;
+
         const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
         user.notifications.push({
           id: notifId,
@@ -333,15 +341,22 @@ export const WithdrawController = {
         });
         await user.save();
 
-          // Emit live update to client
-          if (global.ludoNamespace) {
-            const userRoom = user._id.toString();
-            global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
-              type: "REJECTED",
-              message: `Your withdrawal request of ₹${withdraw.amount} has been REJECTED. Reason: ${remarks}`
-            });
-          }
+        // Emit live update to client
+        if (global.ludoNamespace) {
+          const userRoom = user._id.toString();
+          
+          global.ludoNamespace.to(userRoom).emit("walletUpdated", {
+            depositBalance: user.depositBalance || 0,
+            winningsBalance: user.winningsBalance || 0,
+            walletBalance: user.walletBalance || 0
+          });
+
+          global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
+            type: "REJECTED",
+            message: `Your withdrawal request of ₹${withdraw.amount} has been REJECTED. Reason: ${remarks}`
+          });
         }
+      }
 
       // Update existing transaction log
       await TransactionModel.findOneAndUpdate(

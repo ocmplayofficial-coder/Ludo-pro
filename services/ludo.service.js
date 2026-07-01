@@ -19,6 +19,14 @@ function normalizeMatchmakingQueueKey(entryFee, variant) {
   return `${normalizedFee}:${normalizedVariant}`;
 }
 
+function broadcastLudoQueueUpdate(queueKey) {
+  if (global.ludoNamespace) {
+    const q = global.__matchmakingQueue?.get(queueKey);
+    const count = q ? q.length : 0;
+    global.ludoNamespace.emit('QUEUE_UPDATE', { queueKey, count, gameType: 'ludo' });
+  }
+}
+
 function withMatchmakingLock(queueKey, callback) {
   if (!global.__matchmakingLocks) {
     global.__matchmakingLocks = new Map();
@@ -239,12 +247,14 @@ export class LudoService {
           const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
           if (idx !== -1) {
             console.log('CLEANING_UP_DUPLICATE_QUEUE', { queueKey: k, userId: userIdStr });
+            const item = q[idx];
             q.splice(idx, 1);
             if (q.length === 0) {
               global.__matchmakingQueue.delete(k);
             } else {
               global.__matchmakingQueue.set(k, q);
             }
+            broadcastLudoQueueUpdate(k);
           }
         }
       }
@@ -258,6 +268,7 @@ export class LudoService {
         } else {
           global.__matchmakingQueue.set(queueKey, queue);
         }
+        broadcastLudoQueueUpdate(queueKey);
 
         const game = waiting.game;
         game.players.yellow = { userId: user._id, username: user.username, avatar: user.avatar };
@@ -298,6 +309,7 @@ export class LudoService {
       const freshQueue = global.__matchmakingQueue.get(queueKey) || [];
       freshQueue.push({ user, game });
       global.__matchmakingQueue.set(queueKey, freshQueue);
+      broadcastLudoQueueUpdate(queueKey);
 
       console.log('NEW_MATCHMAKING_ROOM_CREATED', {
         queueKey,
@@ -314,33 +326,36 @@ export class LudoService {
 
       const refundTimeout = setTimeout(async () => {
         try {
-          const q = global.__matchmakingQueue.get(queueKey) || [];
-          const idx = q.findIndex(item => item.user._id.toString() === userIdStr && item.game.matchId === game.matchId);
-          if (idx !== -1) {
-            q.splice(idx, 1);
-            if (q.length === 0) global.__matchmakingQueue.delete(queueKey);
-            else global.__matchmakingQueue.set(queueKey, q);
-
-            if (user.depositBalance >= fee) {
-              user.depositBalance += fee;
-            } else {
-              user.winningsBalance = Math.max(0, user.winningsBalance + fee);
+          if (game.status === 'MATCHMAKING') {
+            game.status = 'CANCELLED';
+            const q = global.__matchmakingQueue.get(queueKey) || [];
+            const qIdx = q.findIndex(i => i.user._id.toString() === userIdStr);
+            if (qIdx !== -1) {
+              q.splice(qIdx, 1);
+              if (q.length === 0) global.__matchmakingQueue.delete(queueKey);
+              else global.__matchmakingQueue.set(queueKey, q);
+              broadcastLudoQueueUpdate(queueKey);
             }
-            user.walletBalance = Math.max(0, user.walletBalance + fee);
-            try {
-              await user.save();
-            } catch (err) {
-              console.warn('Refund save failed', err);
-            }
-            try {
-              const { addTransaction } = await import('../wallet/transaction.service.js');
-              addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${normalizedVariant})` }, user);
-            } catch (err) {
-              console.warn('Refund txn failed', err);
-            }
-
-            console.log('MATCHMAKING_REFUND_ISSUED', { user: userIdStr, fee, matchId: game.matchId });
           }
+          if (user.depositBalance >= fee) {
+            user.depositBalance += fee;
+          } else {
+            user.winningsBalance = Math.max(0, user.winningsBalance + fee);
+          }
+          user.walletBalance = Math.max(0, user.walletBalance + fee);
+          try {
+            await user.save();
+          } catch (err) {
+            console.warn('Refund save failed', err);
+          }
+          try {
+            const { addTransaction } = await import('../wallet/transaction.service.js');
+            addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${normalizedVariant})` }, user);
+          } catch (err) {
+            console.warn('Refund txn failed', err);
+          }
+
+          console.log('MATCHMAKING_REFUND_ISSUED', { user: userIdStr, fee, matchId: game.matchId });
         } catch (err) {
           console.error('Error in refund timeout', err);
         }
@@ -544,7 +559,6 @@ export class LudoService {
       const idx = queue.findIndex(item => item.user._id.toString() === userIdStr);
       if (idx !== -1) {
         const item = queue[idx];
-        const fee = item.game.entryFee;
         const matchId = item.game.matchId;
 
         // Remove from queue
@@ -554,6 +568,7 @@ export class LudoService {
         } else {
           global.__matchmakingQueue.set(queueKey, queue);
         }
+        broadcastLudoQueueUpdate(queueKey);
 
         // Clear refund timeout
         const refundTimer = global.__matchmakingRefunds.get(matchId);

@@ -8,6 +8,7 @@ import { PaymentMethodModel } from "../models/paymentMethod.model.js";
 import { DepositRequestModel } from "../models/depositRequest.model.js";
 import { TransactionModel } from "../models/transaction.model.js";
 import { TeenPattiMatchModel } from "../models/teenpattiMatch.model.js";
+import { ArenaModel } from "../models/arena.model.js";
 export class AdminController {
   static async getAllUsers(req, res) {
     console.log("🔥 GET_ALL_USERS CALLED");
@@ -223,30 +224,28 @@ export class AdminController {
 
       const arena = {
         id: Date.now().toString(),
-
         gameType,
-
         mode,
-
         entryFee: Number(entryFee),
-
         winningPrize: Number(winningPrize),
-
         active: true,
-
         createdAt: new Date()
       };
 
-      db.gameArenas.push(arena);
+      // Save to MongoDB
+      const newArena = await ArenaModel.create(arena);
+
+      // Keep in-memory cache synced
+      db.gameArenas.push(newArena.toObject());
 
       console.log(
         "NEW_ARENA_CREATED =",
-        arena
+        newArena
       );
 
       return res.json({
         success: true,
-        arena
+        arena: newArena
       });
 
     } catch (err) {
@@ -268,10 +267,27 @@ export class AdminController {
   // ======================
   static async getArenas(req, res) {
     try {
-
+      // Always fetch fresh from DB for frontend
+      let arenas = await ArenaModel.find().lean();
+      
+      // Attach real-time waiting players count
+      arenas = arenas.map(arena => {
+        let count = 0;
+        if (arena.gameType === 'ludo') {
+          const queueKey = `${arena.entryFee}:${arena.mode?.toUpperCase()}`;
+          const q = global.__matchmakingQueue?.get(queueKey);
+          count = q ? q.length : 0;
+        } else if (arena.gameType === 'teenpatti') {
+          const queueKey = `${arena.entryFee}:${arena.mode?.toUpperCase()}`;
+          const q = global.__tpQueue?.get(queueKey);
+          count = q ? q.length : 0;
+        }
+        return { ...arena, waitingPlayers: count };
+      });
+      
       return res.json({
         success: true,
-        arenas: db.gameArenas || []
+        arenas
       });
 
     } catch (err) {
@@ -854,8 +870,11 @@ export class AdminController {
         active: true,
         createdAt: new Date()
       };
-      db.gameArenas.push(arena);
-      return res.json({ success: true, arena });
+      
+      const newArena = await ArenaModel.create(arena);
+      db.gameArenas.push(newArena.toObject());
+      
+      return res.json({ success: true, arena: newArena });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });
     }
@@ -865,17 +884,26 @@ export class AdminController {
     try {
       const { id } = req.params;
       const { mode, entryFee, winningPrize, active } = req.body;
-      const idx = db.gameArenas.findIndex(a => a.id === id);
-      if (idx === -1) {
+      
+      const updateData = {};
+      if (mode) updateData.mode = mode.toUpperCase();
+      if (entryFee !== undefined) updateData.entryFee = Number(entryFee);
+      if (winningPrize !== undefined) updateData.winningPrize = Number(winningPrize);
+      if (active !== undefined) updateData.active = !!active;
+
+      const updatedArena = await ArenaModel.findOneAndUpdate({ id }, updateData, { new: true }).lean();
+      
+      if (!updatedArena) {
         return res.status(404).json({ success: false, error: "Arena not found" });
       }
-      const arena = db.gameArenas[idx];
-      if (mode) arena.mode = mode.toUpperCase();
-      if (entryFee !== undefined) arena.entryFee = Number(entryFee);
-      if (winningPrize !== undefined) arena.winningPrize = Number(winningPrize);
-      if (active !== undefined) arena.active = !!active;
 
-      return res.json({ success: true, arena });
+      // Sync in-memory DB
+      const idx = db.gameArenas.findIndex(a => a.id === id);
+      if (idx !== -1) {
+        db.gameArenas[idx] = updatedArena;
+      }
+
+      return res.json({ success: true, arena: updatedArena });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });
     }
@@ -884,11 +912,18 @@ export class AdminController {
   static async deleteTPArena(req, res) {
     try {
       const { id } = req.params;
-      const idx = db.gameArenas.findIndex(a => a.id === id);
-      if (idx === -1) {
+      const deleted = await ArenaModel.findOneAndDelete({ id });
+      
+      if (!deleted) {
         return res.status(404).json({ success: false, error: "Arena not found" });
       }
-      db.gameArenas.splice(idx, 1);
+      
+      // Sync in-memory DB
+      const idx = db.gameArenas.findIndex(a => a.id === id);
+      if (idx !== -1) {
+        db.gameArenas.splice(idx, 1);
+      }
+      
       return res.json({ success: true, message: "Arena deleted" });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });

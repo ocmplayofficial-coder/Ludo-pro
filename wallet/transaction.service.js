@@ -1,7 +1,7 @@
 import { db } from '../config/db.js';
 
-export function getFormattedDateTime() {
-  const d = new Date();
+export function getFormattedDateTime(inputDate) {
+  const d = inputDate ? new Date(inputDate) : new Date();
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   const hours = d.getHours();
   const mins = d.getMinutes().toString().padStart(2, '0');

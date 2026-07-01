@@ -1,14 +1,15 @@
 import { TeenPattiService } from '../services/teenpatti.service.js';
 import { db } from '../config/db.js';
 import { TeenPattiMatchModel } from '../models/teenpattiMatch.model.js';
+import { ArenaModel } from '../models/arena.model.js';
 
 export class TeenPattiController {
   
   static async getArenas(req, res) {
     try {
-      let tpArenas = (db.gameArenas || []).filter(a => a.gameType === 'teenpatti');
+      let tpArenas = await ArenaModel.find({ gameType: 'teenpatti' }).lean();
       
-      // Auto seed default arenas if none exist
+      // Auto seed default arenas if none exist in DB
       if (tpArenas.length === 0) {
         const defaults = [
           // Classic
@@ -38,13 +39,20 @@ export class TeenPattiController {
           { id: "tp-j-10000", gameType: "teenpatti", mode: "JOKER", entryFee: 10000, winningPrize: 18000, active: true }
         ];
 
-        defaults.forEach(d => {
-          d.createdAt = new Date();
-          db.gameArenas.push(d);
+        const inserted = await ArenaModel.insertMany(defaults);
+        inserted.forEach(d => {
+          db.gameArenas.push(d.toObject());
         });
 
-        tpArenas = (db.gameArenas || []).filter(a => a.gameType === 'teenpatti');
+        tpArenas = await ArenaModel.find({ gameType: 'teenpatti' }).lean();
       }
+
+      // Attach real-time waiting players count
+      tpArenas = tpArenas.map(arena => {
+        const queueKey = `${arena.entryFee}:${arena.mode?.toUpperCase()}`;
+        const q = global.__tpQueue?.get(queueKey);
+        return { ...arena, waitingPlayers: q ? q.length : 0 };
+      });
 
       return res.json({ success: true, arenas: tpArenas });
     } catch (err) {

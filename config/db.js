@@ -20,6 +20,20 @@ export async function connectDB() {
       console.warn("🟠 MongoDB connection disconnected");
     });
 
+    // Hydrate game arenas from persistent storage to memory for synchronous engine access
+    try {
+      const { ArenaModel } = await import("../models/arena.model.js");
+      const arenas = await ArenaModel.find({ active: true }).lean();
+      
+      // Clear and re-populate the array
+      db.gameArenas.length = 0;
+      arenas.forEach(arena => db.gameArenas.push(arena));
+      
+      console.log(`✅ Loaded ${arenas.length} active arenas from MongoDB to memory`);
+    } catch (arenaErr) {
+      console.error("🔴 Failed to hydrate arenas from MongoDB:", arenaErr);
+    }
+
     return true;
 
   } catch (error) {

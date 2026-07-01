@@ -1,9 +1,17 @@
 import { UserService } from '../services/user.service.js';
 
 export class UserController {
-  static getProfile(req, res) {
+  static async getProfile(req, res) {
     try {
       const profile = UserService.getProfile(req.user);
+
+      // Keep it strictly reading from db state!
+      const dbWinnings = profile.winningsBalance ?? 0;
+      const dbDeposit = profile.depositBalance ?? 0;
+      
+      profile.winningsBalance = dbWinnings;
+      profile.walletBalance = dbDeposit + dbWinnings;
+
       return res.json(profile);
     } catch (err) {
       return res.status(500).json({ error: err.message });

@@ -58,14 +58,12 @@ export class AuthService {
         walletBalance: isTestUser ? 500 : 0
       });
     } else {
-      user.username = `Player_${phoneNumber.slice(-4)}`;
-      user.nickname = user.username;
-      user.avatar = user.username[0];
+      // Do NOT overwrite username and nickname for existing users!
       if (isTestUser) {
         user.depositBalance = 500;
         user.walletBalance = 500;
+        await user.save();
       }
-      await user.save();
     }
 
     // Prepare APITXT payload and debug logs

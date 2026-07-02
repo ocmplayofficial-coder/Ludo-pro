@@ -314,7 +314,7 @@ export class AdminController {
           count = q ? q.length : 0;
           
           for (const game of db.ludoGames.values()) {
-            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase()) {
+            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase() && game.status !== 'MATCHMAKING') {
               if (game.players) {
                 if (game.players.red) count++;
                 if (game.players.yellow) count++;
@@ -327,7 +327,7 @@ export class AdminController {
           count = q ? q.length : 0;
           
           for (const game of db.teenPattiGames.values()) {
-            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase()) {
+            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase() && game.status !== 'MATCHMAKING') {
               if (game.players) {
                 if (game.players.A) count++;
                 if (game.players.B) count++;

@@ -29,7 +29,7 @@ function broadcastLudoQueueUpdate(queueKey) {
     const [feeStr, variantStr] = queueKey.split(':');
     const fee = Number(feeStr);
     for (const game of db.ludoGames.values()) {
-      if (game.entryFee === fee && game.variant === variantStr) {
+      if (game.entryFee === fee && game.variant === variantStr && game.status !== 'MATCHMAKING') {
         if (game.players) {
           if (game.players.red) count++;
           if (game.players.yellow) count++;

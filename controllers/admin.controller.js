@@ -312,10 +312,28 @@ export class AdminController {
           const queueKey = `${arena.entryFee}:${arena.mode?.toUpperCase()}`;
           const q = global.__matchmakingQueue?.get(queueKey);
           count = q ? q.length : 0;
+          
+          for (const game of db.ludoGames.values()) {
+            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase()) {
+              if (game.players) {
+                if (game.players.red) count++;
+                if (game.players.yellow) count++;
+              }
+            }
+          }
         } else if (arena.gameType === 'teenpatti') {
           const queueKey = `${arena.entryFee}:${arena.mode?.toUpperCase()}`;
           const q = global.__tpQueue?.get(queueKey);
           count = q ? q.length : 0;
+          
+          for (const game of db.teenPattiGames.values()) {
+            if (game.entryFee === arena.entryFee && game.variant === arena.mode?.toUpperCase()) {
+              if (game.players) {
+                if (game.players.A) count++;
+                if (game.players.B) count++;
+              }
+            }
+          }
         }
         return { ...arena, waitingPlayers: count };
       });

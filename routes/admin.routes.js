@@ -68,6 +68,12 @@ router.post(
     AdminController.createGame
 );
 
+router.delete(
+    "/games/:id",
+    authMiddleware,
+    AdminController.deleteGame
+);
+
 // ======================
 router.get(
     "/arenas",

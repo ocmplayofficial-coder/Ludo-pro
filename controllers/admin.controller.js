@@ -263,6 +263,41 @@ export class AdminController {
   }
 
   // ======================
+  // DELETE GAME ARENA
+  // ======================
+  static async deleteGame(req, res) {
+    try {
+      const { id } = req.params;
+      
+      let deletedArena;
+      try {
+        deletedArena = await ArenaModel.findByIdAndDelete(id);
+      } catch (err) {
+        // likely CastError for non-ObjectId
+      }
+      
+      if (!deletedArena) {
+        deletedArena = await ArenaModel.findOneAndDelete({ id: id });
+      }
+      
+      if (!deletedArena) {
+         return res.status(404).json({ success: false, message: "Arena not found" });
+      }
+
+      // Keep in-memory cache synced
+      const index = db.gameArenas.findIndex(a => a._id.toString() === id || a.id === id);
+      if (index !== -1) {
+        db.gameArenas.splice(index, 1);
+      }
+      
+      return res.json({ success: true, message: "Arena deleted successfully" });
+    } catch (err) {
+      console.error("DELETE_GAME_ERROR", err);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+
+  // ======================
   // GET ALL ARENAS
   // ======================
   static async getArenas(req, res) {

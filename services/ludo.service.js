@@ -11,6 +11,7 @@ import { getLudoCommonTrackCell } from '../game-engine/ludo/pathEngine.js';
 import { SAFE_CELLS } from '../game-engine/ludo/safeZoneEngine.js';
 import { UserModel } from '../models/user.model.js';
 import { db } from '../config/db.js';
+import { StatsService } from './stats.service.js';
 
 function normalizeMatchmakingQueueKey(entryFee, variant) {
   const fee = Number(entryFee);
@@ -22,7 +23,20 @@ function normalizeMatchmakingQueueKey(entryFee, variant) {
 function broadcastLudoQueueUpdate(queueKey) {
   if (global.ludoNamespace) {
     const q = global.__matchmakingQueue?.get(queueKey);
-    const count = q ? q.length : 0;
+    let count = q ? q.length : 0;
+    
+    // Add active players in this arena
+    const [feeStr, variantStr] = queueKey.split(':');
+    const fee = Number(feeStr);
+    for (const game of db.ludoGames.values()) {
+      if (game.entryFee === fee && game.variant === variantStr) {
+        if (game.players) {
+          if (game.players.red) count++;
+          if (game.players.yellow) count++;
+        }
+      }
+    }
+
     global.ludoNamespace.emit('QUEUE_UPDATE', { queueKey, count, gameType: 'ludo' });
   }
 }
@@ -57,6 +71,15 @@ async function finishGameAndAward(game, winnerColor) {
     clearInterval(global.__ludoGameIntervals.get(game.matchId));
     global.__ludoGameIntervals.delete(game.matchId);
     console.log(`[Timer] Cleared game interval for ${game.matchId} on conclusion`);
+  }
+
+  // Delete from in-memory map when finished
+  db.ludoGames.delete(game.matchId);
+  const queueKey = `${game.entryFee}:${game.variant}`;
+  broadcastLudoQueueUpdate(queueKey);
+  
+  if (global.io) {
+    StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
   }
 
   try {
@@ -310,6 +333,10 @@ export class LudoService {
       freshQueue.push({ user, game });
       global.__matchmakingQueue.set(queueKey, freshQueue);
       broadcastLudoQueueUpdate(queueKey);
+
+      if (global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
 
       console.log('NEW_MATCHMAKING_ROOM_CREATED', {
         queueKey,

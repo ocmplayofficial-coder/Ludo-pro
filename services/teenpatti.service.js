@@ -5,12 +5,33 @@ import { UserModel } from '../models/user.model.js';
 import { TeenPattiMatchModel } from '../models/teenpattiMatch.model.js';
 import { buildDeck } from '../game-engine/teenpatti/deckManager.js';
 import { shuffleDeck } from '../game-engine/teenpatti/cardShuffler.js';
+import { StatsService } from './stats.service.js';
 
 // Timer storage for game intervals
 if (!global.__tpGameIntervals) {
   global.__tpGameIntervals = new Map();
 }
 
+function broadcastTPQueueUpdate(queueKey) {
+  if (global.teenpattiNamespace) {
+    const q = global.__tpQueue?.get(queueKey);
+    let count = q ? q.length : 0;
+    
+    // Add active players in this arena
+    const [feeStr, variantStr] = queueKey.split(':');
+    const fee = Number(feeStr);
+    for (const game of db.teenPattiGames.values()) {
+      if (game.entryFee === fee && game.variant === variantStr) {
+        if (game.players) {
+          if (game.players.A) count++;
+          if (game.players.B) count++;
+        }
+      }
+    }
+
+    global.teenpattiNamespace.emit('QUEUE_UPDATE', { queueKey, count, gameType: 'teenpatti' });
+  }
+}
 function broadcastTPGameUpdate(game) {
   if (global.teenpattiNamespace) {
     console.log("SOCKET_BROADCAST_TP_GAME_UPDATE", game.matchId);
@@ -191,6 +212,9 @@ export class TeenPattiService {
       if (global.teenpattiNamespace) {
         global.teenpattiNamespace.to(matchId).emit('GAME_UPDATE', game);
       }
+      if (global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
 
       return game;
     }
@@ -221,6 +245,10 @@ export class TeenPattiService {
     freshQueue.push({ user, game });
     global.__tpQueue.set(queueKey, freshQueue);
     broadcastTPQueueUpdate(queueKey);
+
+    if (global.io) {
+      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+    }
 
     // Refund timeout
     const refundTimeout = setTimeout(async () => {
@@ -454,6 +482,14 @@ export class TeenPattiService {
     if (global.__tpGameIntervals.has(game.matchId)) {
       clearInterval(global.__tpGameIntervals.get(game.matchId));
       global.__tpGameIntervals.delete(game.matchId);
+    }
+
+    db.teenPattiGames.delete(game.matchId);
+    const queueKey = `${game.entryFee}:${game.variant}`;
+    broadcastTPQueueUpdate(queueKey);
+
+    if (global.io) {
+      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
     }
 
     try {

@@ -2,12 +2,17 @@ import { db } from '../config/db.js';
 
 export function getFormattedDateTime(inputDate) {
   const d = inputDate ? new Date(inputDate) : new Date();
+  
+  // Convert to IST (Asia/Kolkata) to display correct local time
+  const istString = d.toLocaleString("en-US", {timeZone: 'Asia/Kolkata'});
+  const istObj = new Date(istString);
+
   const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const hours = d.getHours();
-  const mins = d.getMinutes().toString().padStart(2, '0');
+  const hours = istObj.getHours();
+  const mins = istObj.getMinutes().toString().padStart(2, '0');
   const ampm = hours >= 12 ? 'pm' : 'am';
   const formattedHours = hours % 12 || 12;
-  return `${d.getDate().toString().padStart(2, '0')} ${months[d.getMonth()]} ${d.getFullYear()} ${formattedHours}:${mins} ${ampm}`;
+  return `${istObj.getDate().toString().padStart(2, '0')} ${months[istObj.getMonth()]} ${istObj.getFullYear()} ${formattedHours}:${mins} ${ampm}`;
 }
 
 export function getTransactions() {

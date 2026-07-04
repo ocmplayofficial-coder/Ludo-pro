@@ -10,7 +10,7 @@ const userSchema = new mongoose.Schema(
     },
     nickname: { type: String, required: true },
     avatar: { type: String, required: true },
-    referralCode: { type: String, default: () => `REF${Math.floor(100 + Math.random() * 900)}` },
+    referralCode: { type: String, default: () => Math.random().toString(36).substring(2, 8).toUpperCase() },
     // wallet related fields (can be moved to a separate Wallet model later)
     walletBalance: { type: Number, default: 0 },
     depositBalance: { type: Number, default: 0 },
@@ -20,6 +20,8 @@ const userSchema = new mongoose.Schema(
     wins: { type: Number, default: 0 },
     earnings: { type: Number, default: 0 },
     referralCount: { type: Number, default: 0 },
+    referralEarnings: { type: Number, default: 0 },
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     referralRewardGiven: { type: Boolean, default: false },
     rewardProcessedAt: { type: Date },
     notifications: {

@@ -66,7 +66,10 @@ export class WalletController {
         method: tx.method
       }));
       
-      return res.json([...mappedDbTxs, ...memTxs]);
+      const allTxs = [...mappedDbTxs, ...memTxs];
+      const uniqueTxs = Array.from(new Map(allTxs.map(tx => [tx.id, tx])).values());
+      
+      return res.json(uniqueTxs);
     } catch (err) {
       return res.status(500).json({ error: err.message });
     }

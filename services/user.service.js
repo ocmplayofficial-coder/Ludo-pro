@@ -5,22 +5,30 @@ export class UserService {
     return user;
   }
 
-  static async updateProfile(user, username) {
+  static async updateProfile(user, username, avatar) {
+    let changed = false;
+    
     if (username && username.trim() !== "") {
-      const clean = username.trim();
-      // If user is a Mongoose document, mutate and save
+      user.username = username.trim();
+      changed = true;
+      if (!user.avatar && !avatar) {
+        user.avatar = user.username[0].toUpperCase();
+      }
+    }
+    
+    if (avatar && avatar.trim() !== "") {
+      user.avatar = avatar.trim();
+      changed = true;
+    }
+    
+    if (changed) {
       try {
-        user.username = clean;
-        user.avatar = clean[0].toUpperCase();
+        console.log("Saving user profile with avatar:", user.avatar);
         if (typeof user.save === 'function') {
-          const saved = await user.save();
-          return saved;
+          return await user.save();
         }
       } catch (e) {
-        // fallback for non-mongoose user object
-        user.username = clean;
-        user.avatar = clean[0].toUpperCase();
-        return user;
+        console.error("Save error:", e);
       }
     }
     return user;

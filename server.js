@@ -114,6 +114,17 @@ async function startServer() {
 //   "https://ocmplay.netlify.app",
 //   "https://ocmplayy.netlify.app", // <-- Add this
 // ];
+//   const allowedOrigins = [
+//   "http://localhost:5173",
+//   "http://localhost:5174",
+//   "http://127.0.0.1:5173",
+//   "http://127.0.0.1:5174",
+//   "http://localhost:8080",
+//   "http://127.0.0.1:8080",
+
+//   "https://ocmplay.netlify.app",
+//   "https://ocmplayy.netlify.app", // Added
+// ];
   const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
@@ -123,7 +134,7 @@ async function startServer() {
   "http://127.0.0.1:8080",
 
   "https://ocmplay.netlify.app",
-  "https://ocmplayy.netlify.app", // Added
+  "https://ocmplayy.netlify.app", // <-- Add this
 ];
   app.use(cors({
     origin(origin, callback) {

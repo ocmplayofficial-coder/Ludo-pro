@@ -89,7 +89,21 @@ async function startServer() {
 
 //   "https://6a46ecd639fed63ffafcb04d--ocmplayy.netlify.app"
 // ];
-  const allowedOrigins = [
+//   const allowedOrigins = [
+//   "http://localhost:5173",
+//   "http://localhost:5174",
+//   "http://127.0.0.1:5173",
+//   "http://127.0.0.1:5174",
+//   "http://localhost:8080",
+//   "http://127.0.0.1:8080",
+
+//   "https://ocmplay.netlify.app",
+//   "https://ocmplayy.netlify.app", // New Frontend URL
+
+//   // Backend API testing
+//   "https://ludo-pro-1.onrender.com",
+// ];
+const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "http://127.0.0.1:5173",
@@ -98,12 +112,8 @@ async function startServer() {
   "http://127.0.0.1:8080",
 
   "https://ocmplay.netlify.app",
-  "https://ocmplayy.netlify.app", // New Frontend URL
-
-  // Backend API testing
-  "https://ludo-pro-1.onrender.com",
+  "https://ocmplayy.netlify.app", // <-- Add this
 ];
-
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);

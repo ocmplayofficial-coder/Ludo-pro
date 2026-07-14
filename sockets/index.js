@@ -2,11 +2,29 @@ import { Server } from 'socket.io';
 import { handleLudoSocket } from './ludo.socket.js';
 import { verifyToken } from '../config/jwt.js';
 import { UserModel } from '../models/user.model.js';
+import { StatsService } from '../services/stats.service.js';
 
 import { handleTeenPattiSocket } from './teenpatti.socket.js';
 
-global.onlinePlayers = new Set();
+global.onlineUsers = new Map();
 global.activeGames = new Map();
+
+function trackAuthenticatedUser(io, userId, socketId) {
+  if (!userId) return;
+  global.onlineUsers.set(userId, socketId);
+  if (io) {
+    StatsService.emitStatsUpdate(io).catch(err => console.error('STATS_EMIT_ERROR', err));
+  }
+}
+
+function untrackAuthenticatedUser(io, userId) {
+  if (!userId) return;
+  global.onlineUsers.delete(userId);
+  if (io) {
+    StatsService.emitStatsUpdate(io).catch(err => console.error('STATS_EMIT_ERROR', err));
+  }
+}
+
 export function initWebSocketServer(server) {
   const io = new Server(server, {
     cors: {
@@ -55,14 +73,14 @@ export function initWebSocketServer(server) {
     console.log('Lobby Socket.IO client connected:', socket.id, 'User:', socket.user._id);
     const userId = socket.user && socket.user._id ? socket.user._id.toString() : null;
     if (userId) {
-      global.onlinePlayers.add(userId);
+      trackAuthenticatedUser(io, userId, socket.id);
     }
     socket.on('message', (data) => {
       console.log('Lobby message received:', data);
     });
     socket.on('disconnect', () => {
       if (userId) {
-        global.onlinePlayers.delete(userId);
+        untrackAuthenticatedUser(io, userId);
       }
     });
   });
@@ -72,8 +90,17 @@ export function initWebSocketServer(server) {
 
   walletNamespace.on('connection', (socket) => {
     console.log('Wallet Socket.IO client connected:', socket.id, 'User:', socket.user._id);
+    const userId = socket.user && socket.user._id ? socket.user._id.toString() : null;
+    if (userId) {
+      trackAuthenticatedUser(io, userId, socket.id);
+    }
     socket.on('message', (data) => {
       console.log('Wallet message received:', data);
+    });
+    socket.on('disconnect', () => {
+      if (userId) {
+        untrackAuthenticatedUser(io, userId);
+      }
     });
   });
 
@@ -84,11 +111,11 @@ export function initWebSocketServer(server) {
 io.on('connection', (socket) => {
   const userId = socket.user && socket.user._id ? socket.user._id.toString() : null;
   if (userId) {
-    global.onlinePlayers.add(userId);
+    global.onlineUsers.set(userId, socket.id);
   }
   socket.on('disconnect', () => {
     if (userId) {
-      global.onlinePlayers.delete(userId);
+      global.onlineUsers.delete(userId);
     }
   });
 });

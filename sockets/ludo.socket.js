@@ -1,6 +1,7 @@
 import { db } from '../config/db.js';
 import { UserModel } from '../models/user.model.js';
 import { LudoService } from '../services/ludo.service.js';
+import { StatsService } from '../services/stats.service.js';
 
 function getPendingLudoGameForUser(userId) {
   if (!userId) return null;
@@ -72,7 +73,11 @@ export function handleLudoSocket(ludoNamespace) {
     const userId = socket.user?._id?.toString();
     console.log('Ludo Socket.IO client connected:', socket.id, 'User:', userId);
     if (userId) {
+      global.onlineUsers.set(userId, socket.id);
       socket.join(userId);
+      if (global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
       console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
       tryAutoJoinPendingMatch(socket, ludoNamespace);
     }
@@ -331,6 +336,12 @@ export function handleLudoSocket(ludoNamespace) {
 
     socket.on('disconnect', () => {
       console.log('Ludo client disconnected:', socket.id);
+      if (userId) {
+        global.onlineUsers.delete(userId);
+      }
+      if (global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
     });
   });
 }

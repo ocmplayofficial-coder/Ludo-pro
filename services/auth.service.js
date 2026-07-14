@@ -1,4 +1,5 @@
 import { claimReferralBonus } from '../wallet/referral.service.js';
+import { addTransaction } from '../wallet/transaction.service.js';
 import { UserModel } from '../models/user.model.js';
 import { env } from '../config/env.js';
 import axios from 'axios';
@@ -54,9 +55,17 @@ export class AuthService {
         username,
         nickname: username,
         avatar: username[0],
-        depositBalance: isTestUser ? 500 : 0,
-        walletBalance: isTestUser ? 500 : 0
+        depositBalance: isTestUser ? 500 : 20,
+        walletBalance: isTestUser ? 500 : 20
       });
+      
+      // Log First Login Bonus transaction
+      await addTransaction({
+        type: "BONUS",
+        amount: isTestUser ? 500 : 20,
+        status: "SUCCESS",
+        method: "First Login Bonus"
+      }, user);
     } else {
       // Do NOT overwrite username and nickname for existing users!
       if (isTestUser) {

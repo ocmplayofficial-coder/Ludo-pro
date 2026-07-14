@@ -1,5 +1,6 @@
 import { db } from '../config/db.js';
 import { TeenPattiService } from '../services/teenpatti.service.js';
+import { StatsService } from '../services/stats.service.js';
 
 export function handleTeenPattiSocket(teenpattiNamespace) {
   teenpattiNamespace.on('connection', (socket) => {
@@ -7,7 +8,11 @@ export function handleTeenPattiSocket(teenpattiNamespace) {
     console.log('TeenPatti Socket.IO client connected:', socket.id, 'User:', userId);
 
     if (userId) {
+      global.onlineUsers.set(userId, socket.id);
       socket.join(userId);
+      if (global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
     }
 
     socket.on('JOIN_GAME', (data) => {
@@ -145,6 +150,12 @@ export function handleTeenPattiSocket(teenpattiNamespace) {
 
     socket.on('disconnect', () => {
       console.log('TeenPatti Socket client disconnected:', socket.id);
+      if (userId) {
+        global.onlineUsers.delete(userId);
+      }
+      if (userId && global.io) {
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+      }
     });
   });
 }

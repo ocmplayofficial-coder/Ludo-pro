@@ -234,6 +234,32 @@ export class LudoService {
       console.warn('Failed to persist user balance after matchmaking deduction', err);
     }
 
+    if (!global.__matchmakingCancels) {
+      global.__matchmakingCancels = new Set();
+    }
+    if (global.__matchmakingCancels.has(userIdStr)) {
+      global.__matchmakingCancels.delete(userIdStr);
+      console.log('MATCHMAKING_CANCELLED_BEFORE_QUEUE', { userId: userIdStr, fee, queueKey });
+      if (user.depositBalance >= fee) {
+        user.depositBalance += fee;
+      } else {
+        user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+      }
+      user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
+      try {
+        await user.save();
+      } catch (err) {
+        console.warn('Refund save failed for cancelled matchmaking', err);
+      }
+      try {
+        const { addTransaction } = await import('../wallet/transaction.service.js');
+        addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
+      } catch (err) {
+        console.warn('Refund txn failed for cancelled matchmaking', err);
+      }
+      return { success: false, message: 'Matchmaking cancelled.' };
+    }
+
     try {
       const { addTransaction } = await import('../wallet/transaction.service.js');
       addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${normalizedVariant})` }, user);
@@ -579,13 +605,18 @@ export class LudoService {
     if (!global.__matchmakingQueue) {
       global.__matchmakingQueue = new Map();
     }
+    if (!global.__matchmakingCancels) {
+      global.__matchmakingCancels = new Set();
+    }
     const userIdStr = user._id.toString();
+    global.__matchmakingCancels.add(userIdStr);
     console.log("CANCEL_MATCHMAKING_REQUEST", userIdStr);
 
     for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
       const idx = queue.findIndex(item => item.user._id.toString() === userIdStr);
       if (idx !== -1) {
         const item = queue[idx];
+        const fee = Number(item.game.entryFee || 0);
         const matchId = item.game.matchId;
 
         // Remove from queue
@@ -607,9 +638,22 @@ export class LudoService {
         // Delete the room from in-memory DB to prevent ghost matchmaking
         db.ludoGames.delete(matchId);
 
-        // Refund user immediately
-        user.walletBalance = (user.walletBalance || 0) + fee;
-        user.depositBalance = (user.depositBalance || 0) + fee;
+        if (!Number.isFinite(fee) || fee <= 0) {
+          console.warn('Invalid matchmaking fee during cancel:', item.game.entryFee, matchId);
+          return { success: false, message: 'Invalid matchmaking fee.' };
+        }
+
+        if (global.__matchmakingCancels.has(userIdStr)) {
+          global.__matchmakingCancels.delete(userIdStr);
+        }
+
+        // Refund user immediately using same refund logic as timeout/refund path
+        if (user.depositBalance >= fee) {
+          user.depositBalance += fee;
+        } else {
+          user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+        }
+        user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
         await user.save();
 
         // Record transaction
@@ -625,6 +669,6 @@ export class LudoService {
       }
     }
 
-    return { success: false, message: "User not in matchmaking queue." };
+    return { success: true, message: "Cancellation requested. Matchmaking will be stopped if it is still pending." };
   }
 }

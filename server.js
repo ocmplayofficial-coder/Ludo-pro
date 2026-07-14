@@ -29,113 +29,19 @@ async function startServer() {
   const PORT = process.env.PORT || 5000;
 
   // Middlewares
-// const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://127.0.0.1:5173",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-
-//   "https://6a3a1211c338d107276ecafd--ocmplayy.netlify.app"
-// ];
-
-  // const allowedOrigins = [
-  //   "http://localhost:5173",
-  //   "http://127.0.0.1:5173",
-  //   "http://localhost:8080",
-  //   "https://ocmplay.netlify.app",
-  //   "https://ocmplayy.netlify.app",
-  //   "http://127.0.0.1:8080"
-  // ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://127.0.0.1:5173",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app"
-// ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app"
-// ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://localhost:5174",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app"
-// ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://localhost:5174",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app",
-
-//   "https://6a46ecd639fed63ffafcb04d--ocmplayy.netlify.app"
-// ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://localhost:5174",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app", // New Frontend URL
-
-//   // Backend API testing
-//   "https://ludo-pro-1.onrender.com",
-// ];
-// const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://localhost:5174",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app", // <-- Add this
-// ];
-//   const allowedOrigins = [
-//   "http://localhost:5173",
-//   "http://localhost:5174",
-//   "http://127.0.0.1:5173",
-//   "http://127.0.0.1:5174",
-//   "http://localhost:8080",
-//   "http://127.0.0.1:8080",
-
-//   "https://ocmplay.netlify.app",
-//   "https://ocmplayy.netlify.app", // Added
-// ];
   const allowedOrigins = [
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "http://127.0.0.1:5173",
-  "http://127.0.0.1:5174",
-  "http://localhost:8080",
-  "http://127.0.0.1:8080",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+    "http://localhost:8080",
+    "https://ocmplay.netlify.app",
+    "https://ocmplayy.netlify.app",
+    "http://127.0.0.1:8080"
+  ];
+  
 
-  "https://ocmplay.netlify.app",
-  "https://ocmplayy.netlify.app", // <-- Add this
-];
   app.use(cors({
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -211,6 +117,14 @@ async function startServer() {
   });
 
   // Bind Routes
+  // Debug: log incoming requests to upigateway path to help diagnose 404s
+  app.use((req, res, next) => {
+    if (req.path && req.path.startsWith('/api/payments/upigateway')) {
+      console.log('Incoming request for upigateway:', req.method, req.path);
+    }
+    next();
+  });
+
   app.use("/api/auth", authRoutes);
   app.use("/api/users", userRoutes);
   app.use("/api/wallet", walletRoutes);
@@ -218,6 +132,7 @@ async function startServer() {
   app.use("/api/teenpatti", teenPattiRoutes);
   app.use("/api/payment", paymentRoutes);
   app.use("/api/payments/upigateway", upigatewayRoutes);
+  console.log('Mounted /api/payments/upigateway -> upigatewayRoutes');
   app.use("/api/referral", referralRoutes);
   app.use("/api/admin", adminRoutes);
   app.use("/api/payment-methods", paymentMethodRoutes);
@@ -251,6 +166,80 @@ async function startServer() {
 
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Ludo & Card Pro Server running on http://0.0.0.0:${PORT}`);
+
+    // Startup environment diagnostics helpful for remote deploy verification
+    try {
+      console.log('Server startup diagnostics:');
+      console.log('  CWD:', process.cwd());
+      console.log('  NODE_ENV:', process.env.NODE_ENV);
+      console.log('  process.argv:', process.argv.join(' '));
+      console.log('  import.meta.url:', import.meta.url);
+    } catch (e) {
+      console.warn('Failed printing startup diagnostics', e);
+    }
+
+    // Print all registered routes to help detect missing/mis-mounted routes on deploy
+    try {
+      const routes = [];
+      app._router.stack.forEach((middleware) => {
+        if (middleware.route) {
+          const methods = Object.keys(middleware.route.methods).join(',').toUpperCase();
+          routes.push({ path: middleware.route.path, methods });
+        } else if (middleware.name === 'router' && middleware.handle && middleware.handle.stack) {
+          middleware.handle.stack.forEach((handler) => {
+            if (handler.route) {
+              const methods = Object.keys(handler.route.methods).join(',').toUpperCase();
+              routes.push({ path: handler.route.path, methods });
+            }
+          });
+        }
+      });
+      console.log('Registered routes:');
+      routes.forEach((r) => console.log(`  ${r.methods}	${r.path}`));
+
+      // Check for expected UPI routes mounted under /api/payments/upigateway
+      const expected = [
+        { method: 'GET', path: '/api/payments/upigateway/debug' },
+        { method: 'GET', path: '/api/payments/upigateway/status/:clientTxnId' },
+        { method: 'POST', path: '/api/payments/upigateway/create-order' },
+        { method: 'POST', path: '/api/payments/upigateway/webhook' }
+      ];
+      expected.forEach((e) => {
+        const found = routes.find((r) => r.path && r.path.includes('/api/payments/upigateway') && r.methods.includes(e.method.replace('GET','GET').replace('POST','POST')) && r.path.includes(e.path.replace('/api/payments/upigateway','')));
+        if (found) {
+          console.log(`OK: Found ${e.method} ${e.path} -> matched ${found.methods} ${found.path}`);
+        } else {
+          console.warn(`MISSING: ${e.method} ${e.path} not found in registered routes`);
+        }
+      });
+    } catch (e) {
+      console.warn('Failed enumerating routes', e);
+    }
+  });
+
+  // Diagnostic route: list registered routes
+  app.get('/debug/routes', (req, res) => {
+    try {
+      const routes = [];
+      app._router.stack.forEach((middleware) => {
+        if (middleware.route) {
+          // route registered directly on the app
+          const methods = Object.keys(middleware.route.methods).join(',').toUpperCase();
+          routes.push({ path: middleware.route.path, methods });
+        } else if (middleware.name === 'router' && middleware.handle && middleware.handle.stack) {
+          // router middleware
+          middleware.handle.stack.forEach((handler) => {
+            if (handler.route) {
+              const methods = Object.keys(handler.route.methods).join(',').toUpperCase();
+              routes.push({ path: handler.route.path, methods });
+            }
+          });
+        }
+      });
+      res.json({ success: true, routes });
+    } catch (e) {
+      res.status(500).json({ success: false, error: e.message });
+    }
   });
 }
 

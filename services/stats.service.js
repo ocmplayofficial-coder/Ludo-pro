@@ -4,17 +4,10 @@ class StatsService {
 
   static async getOnlinePlayers() {
     try {
-      const namespaces = [
-        global.lobbyNamespace,
-        global.ludoNamespace,
-        global.teenpattiNamespace,
-        global.walletNamespace
-      ];
-
-      return namespaces.reduce((total, ns) => {
-        return total + (ns?.sockets?.size || 0);
-      }, 0);
-
+      if (global.onlineUsers instanceof Map) {
+        return global.onlineUsers.size;
+      }
+      return 0;
     } catch (err) {
       console.error("ONLINE_PLAYERS_ERROR", err);
       return 0;
@@ -23,63 +16,21 @@ class StatsService {
 
   static async getLiveGames() {
     try {
-
-      console.log("======== LIVE GAME CHECK ========");
-
-      console.log("db.ludoGames =", db.ludoGames);
-      console.log("size =", db.ludoGames?.size);
-
-      let count = 0;
-
-      for (const game of db.ludoGames.values()) {
-
-        console.log(
-          "GAME:",
-          game.matchId,
-          game.status
-        );
-
-        if (
-          ["MATCHMAKING", "PLAYING", "PLAYING_PENDING"]
-            .includes(game.status)
-        ) {
-          count++;
-        }
+      if (db.ludoGames instanceof Map) {
+        return db.ludoGames.size;
       }
-
-      console.log("FINAL LIVE COUNT =", count);
-
-      return count;
-
+      return 0;
     } catch (err) {
-      console.error(err);
+      console.error("LIVE_GAMES_ERROR", err);
       return 0;
     }
   }
   static async getLiveTeenPattiGames() {
     try {
-      const games = db?.teenPattiGames;
-
-      if (!games || !(games instanceof Map)) {
-        return 0;
+      if (db.teenPattiGames instanceof Map) {
+        return db.teenPattiGames.size;
       }
-
-      let count = 0;
-
-      for (const game of games.values()) {
-        if (
-          game &&
-          (
-            game.status === "MATCHMAKING" ||
-            game.status === "PLAYING"
-          )
-        ) {
-          count++;
-        }
-      }
-
-      return count;
-
+      return 0;
     } catch (err) {
       console.error("LIVE_TEEN_PATTI_ERROR", err);
       return 0;

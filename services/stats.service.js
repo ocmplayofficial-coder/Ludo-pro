@@ -4,10 +4,45 @@ class StatsService {
 
   static async getOnlinePlayers() {
     try {
-      if (global.onlineUsers instanceof Map) {
-        return global.onlineUsers.size;
+      const activePlayers = new Set();
+
+      const addPlayer = (userId) => {
+        if (!userId) return;
+        activePlayers.add(String(userId));
+      };
+
+      if (db.ludoGames instanceof Map) {
+        for (const game of db.ludoGames.values()) {
+          if (!game || !game.players) continue;
+          const isActive = ['PLAYING', 'PLAYING_PENDING', 'MATCHMAKING'].includes(game.status);
+          if (!isActive) continue;
+          addPlayer(game.players?.red?.userId);
+          addPlayer(game.players?.yellow?.userId);
+        }
       }
-      return 0;
+
+      if (db.teenPattiGames instanceof Map) {
+        for (const game of db.teenPattiGames.values()) {
+          if (!game || !game.players) continue;
+          const isActive = ['PLAYING', 'PLAYING_PENDING', 'MATCHMAKING'].includes(game.status);
+          if (!isActive) continue;
+          addPlayer(game.players?.A?.userId);
+          addPlayer(game.players?.B?.userId);
+        }
+      }
+
+      const queueMaps = [global.__matchmakingQueue, global.__tpQueue];
+      for (const queueMap of queueMaps) {
+        if (!(queueMap instanceof Map)) continue;
+        for (const queue of queueMap.values()) {
+          if (!Array.isArray(queue)) continue;
+          for (const entry of queue) {
+            addPlayer(entry?.user?._id || entry?.user?.id);
+          }
+        }
+      }
+
+      return activePlayers.size;
     } catch (err) {
       console.error("ONLINE_PLAYERS_ERROR", err);
       return 0;

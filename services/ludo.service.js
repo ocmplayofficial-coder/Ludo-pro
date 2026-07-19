@@ -333,6 +333,45 @@ export class LudoService {
           global.__matchmakingRefunds.delete(game.matchId);
         }
 
+        // Setup 20-second connection timeout to protect against ghost matches
+        const connectionTimeout = setTimeout(async () => {
+          try {
+            const checkGame = db.ludoGames.get(game.matchId);
+            if (checkGame && checkGame.status === 'PLAYING_PENDING') {
+              console.log('[MM] PLAYING_PENDING_TIMEOUT_REFUND', { matchId: game.matchId });
+              checkGame.status = 'CANCELLED';
+              db.ludoGames.delete(game.matchId);
+              ArenaStatusManager.leavePool(queueKey);
+              
+              if (global.ludoNamespace) {
+                global.ludoNamespace.to(game.matchId).emit('GAME_CANCELLED', { reason: 'Players failed to connect in time' });
+              }
+
+              // Refund Red
+              const redUser = await UserModel.findById(checkGame.players.red.userId);
+              if (redUser) {
+                if (redUser.depositBalance >= fee) redUser.depositBalance += fee;
+                else redUser.winningsBalance = Math.max(0, (redUser.winningsBalance || 0) + fee);
+                redUser.walletBalance = Math.max(0, (redUser.walletBalance || 0) + fee);
+                await redUser.save().catch(e => console.warn('Red refund save err', e));
+              }
+
+              // Refund Yellow
+              const yellowUser = await UserModel.findById(checkGame.players.yellow.userId);
+              if (yellowUser) {
+                if (yellowUser.depositBalance >= fee) yellowUser.depositBalance += fee;
+                else yellowUser.winningsBalance = Math.max(0, (yellowUser.winningsBalance || 0) + fee);
+                yellowUser.walletBalance = Math.max(0, (yellowUser.walletBalance || 0) + fee);
+                await yellowUser.save().catch(e => console.warn('Yellow refund save err', e));
+              }
+            }
+          } catch (e) {
+            console.error('[MM] Connection timeout error', e);
+          }
+        }, 20000);
+        
+        global.__matchmakingRefunds.set(game.matchId, connectionTimeout);
+
         // Sync queue display and increment playing counters
         broadcastLudoQueueUpdate(queueKey);
         ArenaStatusManager.joinPool(queueKey);

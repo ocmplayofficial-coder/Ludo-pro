@@ -1,392 +1,672 @@
-import { db } from '../config/db.js';
+import { createLudoRoom, getLudoRoom } from '../game-engine/ludo/roomManager.js';
+import { rollDice } from '../game-engine/ludo/diceEngine.js';
+import { hasAnyPlayableMoves, canTokenMove } from '../game-engine/ludo/validator.js';
+import { moveToken } from '../game-engine/ludo/movementEngine.js';
+import { evaluateCaptures } from '../game-engine/ludo/killEngine.js';
+import { hasAllTokensReachedHome } from '../game-engine/ludo/homeEngine.js';
+import { awardWinner } from '../game-engine/ludo/rewardEngine.js';
+import { switchTurn } from '../game-engine/ludo/turnManager.js';
+import { evaluateWinnerByScore, calculateScores, calculatePlayerScore } from '../game-engine/ludo/winnerEngine.js';
+import { getLudoCommonTrackCell } from '../game-engine/ludo/pathEngine.js';
+import { SAFE_CELLS } from '../game-engine/ludo/safeZoneEngine.js';
 import { UserModel } from '../models/user.model.js';
-import { LudoService } from '../services/ludo.service.js';
-import { StatsService } from '../services/stats.service.js';
+import { db } from '../config/db.js';
+import { StatsService } from './stats.service.js';
 import { ArenaStatusManager } from '../game-engine/ludo/ArenaStatusManager.js';
 
-function getPendingLudoGameForUser(userId) {
-  if (!userId) return null;
-
-  for (const game of db.ludoGames.values()) {
-    if (!game || !game.players) continue;
-
-    const redId = game.players.red?.userId?.toString?.();
-    const yellowId = game.players.yellow?.userId?.toString?.();
-    const isRed = userId === redId;
-    const isYellow = userId === yellowId;
-
-    if ((game.status === 'PLAYING_PENDING' || game.status === 'PLAYING') && (isRed || isYellow)) {
-      return game;
-    }
-
-    if (game.status === 'MATCHMAKING' && isRed) {
-      return game;
-    }
-  }
-
-  return null;
+function normalizeMatchmakingQueueKey(entryFee, variant) {
+  const fee = Number(entryFee);
+  const normalizedFee = Number.isFinite(fee) ? fee : entryFee;
+  const normalizedVariant = String(variant || '').toUpperCase().trim();
+  return `${normalizedFee}:${normalizedVariant}`;
 }
 
-function tryAutoJoinPendingMatch(socket, ludoNamespace) {
-  const userId = socket.user?._id?.toString();
-  if (!userId) return;
-
-  const game = getPendingLudoGameForUser(userId);
-  if (!game) return;
-
-  const matchId = game.matchId;
-  if (!matchId) return;
-
-  const room = ludoNamespace.adapter.rooms.get(matchId);
-  if (room && room.has(socket.id)) {
-    return;
-  }
-
-  console.log('AUTO_JOIN_PENDING_GAME', { socketId: socket.id, userId, matchId, status: game.status });
-  socket.join(matchId);
-
-  const playerColor = socket.user?._id?.toString() === game.players.red?.userId?.toString() ? 'red' : 'yellow';
-  socket.data.playerColor = playerColor;
-
-  const joinedPayload = {
-    playerId: userId,
-    players: game.players,
-    roomId: matchId
-  };
-
-  socket.emit('PLAYER_JOINED', joinedPayload);
-  socket.emit('GAME_UPDATE', game);
-  socket.emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-
-  if (game.status === 'PLAYING' || game.started) {
-    const startPayload = {
-      currentTurn: game.turn,
-      currentPlayerId: game.turn === 'red' ? game.players.red?.userId?.toString() : game.players.yellow?.userId?.toString(),
-      players: game.players,
-      roomId: matchId
-    };
-    socket.emit('GAME_STARTED', startPayload);
+function broadcastLudoQueueUpdate(queueKey) {
+  if (global.ludoNamespace) {
+    const q = global.__matchmakingQueue?.get(queueKey);
+    ArenaStatusManager.syncState(queueKey, q);
   }
 }
 
-export function handleLudoSocket(ludoNamespace) {
-  ludoNamespace.on('connection', (socket) => {
-    const userId = socket.user?._id?.toString();
-    console.log('Ludo Socket.IO client connected:', socket.id, 'User:', userId);
-    
-    if (!userId) {
-      console.warn('Ludo Socket connection rejected: No authenticated user.');
-      return socket.disconnect(true);
+function withMatchmakingLock(queueKey, callback) {
+  if (!global.__matchmakingLocks) {
+    global.__matchmakingLocks = new Map();
+  }
+
+  const previous = global.__matchmakingLocks.get(queueKey) || Promise.resolve();
+  let release;
+  const current = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  global.__matchmakingLocks.set(queueKey, previous.then(() => current, () => current));
+
+  return previous.then(async () => {
+    try {
+      return await callback();
+    } finally {
+      if (release) release();
     }
-    
-    // Duplicate Login Protection: Remove stale socket
-    const existingSocketId = global.onlineUsers.get(userId);
-    if (existingSocketId && existingSocketId !== socket.id) {
-      const existingSocket = ludoNamespace.sockets.get(existingSocketId);
-      if (existingSocket) {
-        console.log(`Disconnecting stale socket ${existingSocketId} for user ${userId}`);
-        existingSocket.disconnect(true);
+  });
+}
+
+async function finishGameAndAward(game, winnerColor) {
+  game.winner = winnerColor;
+  game.status = 'FINISHED';
+
+  if (global.__ludoGameIntervals && global.__ludoGameIntervals.has(game.matchId)) {
+    clearInterval(global.__ludoGameIntervals.get(game.matchId));
+    global.__ludoGameIntervals.delete(game.matchId);
+    console.log(`[Timer] Cleared game interval for ${game.matchId} on conclusion`);
+  }
+
+  // Delete from in-memory map when finished
+  db.ludoGames.delete(game.matchId);
+  const queueKey = `${game.entryFee}:${game.variant}`;
+  broadcastLudoQueueUpdate(queueKey);
+  ArenaStatusManager.leavePool(queueKey);
+  
+  if (global.io) {
+    StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+  }
+
+  try {
+    const redPlayerId = game.players.red.userId;
+    const yellowPlayerId = game.players.yellow?.userId;
+
+    const redUser = await UserModel.findById(redPlayerId);
+    const yellowUser = yellowPlayerId ? await UserModel.findById(yellowPlayerId) : null;
+
+    if (winnerColor === 'red') {
+      if (redUser) {
+        await awardWinner(redUser, game.winningPrize, game.variant);
+      }
+      if (yellowUser) {
+        yellowUser.gamesPlayed += 1;
+        await yellowUser.save();
+      }
+    } else if (winnerColor === 'yellow') {
+      if (yellowUser) {
+        await awardWinner(yellowUser, game.winningPrize, game.variant);
+      }
+      if (redUser) {
+        redUser.gamesPlayed += 1;
+        await redUser.save();
+      }
+    } else if (winnerColor === 'draw') {
+      // Refund entry fee on draw
+      const entryFee = game.entryFee;
+      if (redUser) {
+        redUser.walletBalance = (redUser.walletBalance || 0) + entryFee;
+        redUser.depositBalance = (redUser.depositBalance || 0) + entryFee;
+        redUser.gamesPlayed += 1;
+        await redUser.save();
+        try {
+          const { addTransaction } = await import('../wallet/transaction.service.js');
+          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` }, redUser);
+        } catch (err) { }
+      }
+      if (yellowUser) {
+        yellowUser.walletBalance = (yellowUser.walletBalance || 0) + entryFee;
+        yellowUser.depositBalance = (yellowUser.depositBalance || 0) + entryFee;
+        yellowUser.gamesPlayed += 1;
+        await yellowUser.save();
+        try {
+          const { addTransaction } = await import('../wallet/transaction.service.js');
+          addTransaction({ type: 'REFUND', amount: entryFee, status: 'SUCCESS', method: `Ludo Draw Refund` }, yellowUser);
+        } catch (err) { }
       }
     }
+  } catch (err) {
+    console.error("Error awarding ludo winner:", err);
+  }
+}
 
-    global.onlineUsers.set(userId, socket.id);
-    socket.join(userId);
-    
-    if (global.io) {
-      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+function broadcastGameUpdate(game) {
+  if (global.ludoNamespace) {
+    console.log("SOCKET_BROADCAST_GAME_UPDATE", game.matchId);
+    global.ludoNamespace.to(game.matchId).emit('GAME_UPDATE', game);
+  }
+}
+
+export class LudoService {
+  static startGameTimer(gameId) {
+    if (!global.__ludoGameIntervals) {
+      global.__ludoGameIntervals = new Map();
     }
-    console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
-    tryAutoJoinPendingMatch(socket, ludoNamespace);
 
-    // Broadcast current arena statuses to the newly connected client
-    ArenaStatusManager.broadcastAll(socket);
+    if (global.__ludoGameIntervals.has(gameId)) {
+      clearInterval(global.__ludoGameIntervals.get(gameId));
+    }
 
-    socket.on('JOIN_GAME', (data) => {
-      const { matchId } = data;
-      const socketUserId = socket.user?._id?.toString();
-      console.log('JOIN_GAME_RECEIVED', { socketId: socket.id, socketUserId, matchId });
-
-      if (!matchId) {
-        console.warn('JOIN_GAME: no matchId provided', { socketId: socket.id, socketUserId, data });
-        return;
-      }
-
-      socket.join(matchId);
-      console.log("SOCKET_JOINED", { socketId: socket.id, matchId });
-
-      const roomAfterJoin = ludoNamespace.adapter.rooms.get(matchId);
-      console.log('ROOM_AFTER_JOIN', { matchId, members: roomAfterJoin ? [...roomAfterJoin] : [] });
-
-      const game = db.ludoGames.get(matchId);
-      if (!game) {
-        console.warn("JOIN_GAME: game not found for", { matchId, socketId: socket.id, socketUserId });
-        return;
-      }
-      
-      if (!game.status || game.status === 'MATCHMAKING') {
-        game.status = 'PLAYING_PENDING';
-      }
-
-      // Compute player color for this socket and opponent
-      const redId = game.players?.red?.userId ? game.players.red.userId.toString() : null;
-      const yellowId = game.players?.yellow?.userId ? game.players.yellow.userId.toString() : null;
-      const playerColor = (socketUserId === redId) ? 'red' : 'yellow';
-      socket.data.playerColor = playerColor;
-
-      const opponent = playerColor === 'red' ? game.players.yellow : game.players.red;
-      console.log('PLAYER_COLOR', { socketId: socket.id, playerColor });
-      console.log('OPPONENT_SELECTED', { socketId: socket.id, opponent });
-      // Log room size for debugging
-      const room = ludoNamespace.adapter.rooms.get(matchId);
-      console.log('ROOM_SIZE', matchId, room ? room.size : 0);
-
-      // Determine if both player slots are filled based on actual room membership
-      const roomAfter = ludoNamespace.adapter.rooms.get(matchId);
-      const roomSize = roomAfter ? roomAfter.size : 0;
-      // Use room membership as the authoritative indicator that two clients are present
-      const bothPlayersJoined = roomSize >= 2;
-      game.bothPlayersJoined = bothPlayersJoined;
-      console.log("PLAYERS_JOINED_STATUS", { matchId, bothPlayersJoined, roomSize });
-
-      const joinedPayload = {
-        playerId: socketUserId,
-        players: game.players,
-        roomId: matchId
-      };
-      console.log('EMITTING TO ROOM (PLAYER_JOINED)', matchId);
-      ludoNamespace.to(matchId).emit('PLAYER_JOINED', joinedPayload);
-      console.log('PLAYER_JOINED_EMITTED', { matchId, payload: joinedPayload });
-
+    const intervalId = setInterval(async () => {
       try {
-        socket.emit('PLAYER_JOINED', joinedPayload);
-        socket.emit('GAME_UPDATE', game);
-        socket.emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('DIRECT_EMITS_TO_JOINER_SENT', { socketId: socket.id, matchId });
+        const game = getLudoRoom(gameId);
+        if (!game || game.status !== 'PLAYING') {
+          clearInterval(intervalId);
+          global.__ludoGameIntervals.delete(gameId);
+          return;
+        }
+
+        // 1. Tick turn timer
+        game.turnTimerRemaining = (game.turnTimerRemaining || 18) - 1;
+        console.log('TIMER_TICK');
+        if (game.turnTimerRemaining <= 0) {
+          console.log(`[Timer] Timeout tick occurred for game ${gameId}`);
+          await LudoService.timeout(gameId);
+        }
+
+        // 2. Tick match timer for TIME mode
+        if (game.variant === 'TIME') {
+          game.timerRemaining = (game.timerRemaining || 300) - 1;
+          // console.log('TIMER_TICK'); // removed duplicate
+          console.log('[Timer] TIMER_TICK match timer', game.timerRemaining);
+          if (game.timerRemaining <= 0) {
+            console.log(`[Timer] Time Mode expired for game ${gameId}`);
+            await LudoService.endTimeMode(gameId);
+            clearInterval(intervalId);
+            global.__ludoGameIntervals.delete(gameId);
+            return;
+          }
+        }
+
+        broadcastGameUpdate(game);
       } catch (err) {
-        console.warn('Failed direct emit to joiner', err);
+        console.error(`Error in game timer loop for game ${gameId}:`, err);
       }
+    }, 1000);
 
-      // Log game status for diagnostics
-      console.log('GAME_STATUS', { matchId, status: game.status });
+    global.__ludoGameIntervals.set(gameId, intervalId);
+    console.log(`[Timer] Started game timer for room ${gameId}`);
+  }
 
-      // Log game state before attempting to start
-      console.log('GAME_STATE', {
-        status: game.status,
-        waitingForPlayers: game.waitingForPlayers,
-        started: game.started,
-        bothPlayersJoined
+  static async matchmaking(user, variant, entryFee) {
+    if (!global.__matchmakingQueue) {
+      global.__matchmakingQueue = new Map();
+    }
+    if (!global.__matchmakingRefunds) {
+      global.__matchmakingRefunds = new Map();
+    }
+
+    const queueKey = normalizeMatchmakingQueueKey(entryFee, variant);
+    const userIdStr = user._id.toString();
+    const normalizedVariant = String(variant || '').toUpperCase().trim();
+    const fee = parseFloat(entryFee);
+
+    console.log('MATCHMAKING_REQUEST', {
+      username: user.username,
+      userId: userIdStr,
+      variant: normalizedVariant,
+      entryFee: fee,
+      queueKey,
+      env: process.env.NODE_ENV || 'unknown'
+    });
+
+    if (!Number.isFinite(fee) || fee <= 0) {
+      throw new Error('Invalid entry fee.');
+    }
+
+    if (user.walletBalance < fee) throw new Error('Insufficient wallet balance.');
+    if (user.depositBalance >= fee) {
+      user.depositBalance -= fee;
+    } else {
+      const rest = fee - user.depositBalance;
+      user.depositBalance = 0;
+      user.winningsBalance = Math.max(0, user.winningsBalance - rest);
+    }
+    user.walletBalance = Math.max(0, user.walletBalance - fee);
+
+    try {
+      await user.save();
+    } catch (err) {
+      console.warn('Failed to persist user balance after matchmaking deduction', err);
+    }
+
+    if (!global.__matchmakingCancels) {
+      global.__matchmakingCancels = new Set();
+    }
+    if (global.__matchmakingCancels.has(userIdStr)) {
+      global.__matchmakingCancels.delete(userIdStr);
+      console.log('MATCHMAKING_CANCELLED_BEFORE_QUEUE', { userId: userIdStr, fee, queueKey });
+      if (user.depositBalance >= fee) {
+        user.depositBalance += fee;
+      } else {
+        user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+      }
+      user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
+      try {
+        await user.save();
+      } catch (err) {
+        console.warn('Refund save failed for cancelled matchmaking', err);
+      }
+      try {
+        const { addTransaction } = await import('../wallet/transaction.service.js');
+        addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
+      } catch (err) {
+        console.warn('Refund txn failed for cancelled matchmaking', err);
+      }
+      return { success: false, message: 'Matchmaking cancelled.' };
+    }
+
+    try {
+      const { addTransaction } = await import('../wallet/transaction.service.js');
+      addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${normalizedVariant})` }, user);
+    } catch (err) {
+      console.warn('Failed to record matchmaking transaction', err);
+    }
+
+    return await withMatchmakingLock(queueKey, async () => {
+      const queue = global.__matchmakingQueue.get(queueKey) || [];
+      console.log('QUEUE_BEFORE_JOIN', {
+        queueKey,
+        queueLength: queue.length,
+        waitingRoomIds: queue.map(item => item.game.matchId),
+        userId: userIdStr
       });
 
-      // If both players are present and the game is pending, transition to PLAYING and emit start events
-      if (bothPlayersJoined && (game.status === 'PLAYING_PENDING' || game.waitingForPlayers)) {
-        game.status = 'PLAYING';
-        game.waitingForPlayers = false;
-        game.started = true;
-        game.timerRemaining = 300;
-        game.turnTimerRemaining = 18;
-        
-        // Start server authoritative game timer loop
-        LudoService.startGameTimer(game.matchId);
-
-        // Prepare concise game start payload per requirement
-        const startPayload = {
-          currentTurn: game.turn,
-          currentPlayerId: (game.turn === 'red' ? redId : yellowId),
-          players: game.players,
-          roomId: game.matchId
+      const sameQueue = queue;
+      const existingIndex = sameQueue.findIndex(item => item.user._id.toString() === userIdStr);
+      if (existingIndex !== -1) {
+        const existingItem = sameQueue[existingIndex];
+        console.log('PLAYER_ALREADY_IN_QUEUE', {
+          queueKey,
+          userId: userIdStr,
+          existingMatchId: existingItem.game.matchId
+        });
+        return {
+          ...existingItem.game,
+          status: 'MATCHMAKING'
         };
-
-        console.log("GAME_READY", { matchId: game.matchId });
-        console.log('EMITTING TO ROOM (MATCH_FOUND)', matchId);
-        const roomBeforeMatchFound = ludoNamespace.adapter.rooms.get(matchId);
-        console.log('ROOM_MEMBERS', matchId, roomBeforeMatchFound ? [...roomBeforeMatchFound] : []);
-        ludoNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('MATCH_FOUND_EMITTED', { matchId });
-        console.log("TURN_ASSIGNED", { matchId: game.matchId, currentTurn: game.turn, currentPlayerId: startPayload.currentPlayerId });
-
-        // Emit GAME_STARTED and a full GAME_UPDATE to the room (order intentionally maintained)
-        console.log('EMITTING TO ROOM (GAME_STARTED)', matchId);
-        ludoNamespace.to(matchId).emit('GAME_STARTED', startPayload);
-        console.log('EMITTING TO ROOM (GAME_UPDATE)', matchId);
-        ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
-        console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'GAME_STARTED/GAME_UPDATE' });
-      } else if (game.status === 'PLAYING_PENDING') {
-        console.log('EMITTING TO ROOM (MATCH_FOUND) (pending)', matchId);
-        ludoNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('MATCH_FOUND_EMITTED (pending)', { matchId });
-        console.log('EMITTING TO ROOM (GAME_UPDATE) (pending)', matchId);
-        ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
-        console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'PENDING_GAME_UPDATE' });
-      } else {
-        console.log('EMITTING TO ROOM (MATCH_FOUND) (late joiner)', matchId);
-        ludoNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('MATCH_FOUND_EMITTED (late joiner)', { matchId });
-        console.log('EMITTING TO ROOM (GAME_UPDATE) (late joiner)', matchId);
-        ludoNamespace.to(matchId).emit('GAME_UPDATE', game);
-        console.log('GAME_UPDATE_SENT', { matchId: game.matchId, type: 'LATE_JOINER_GAME_UPDATE' });
       }
-    });
 
-    socket.on('ROLL', async (data) => {
-      console.log("SERVER_RECEIVED", Date.now());
-      const { matchId } = data;
-      console.log('ROLL_DICE_RECEIVED', { matchId, socketId: socket.id, user: socket.user?._id });
-      try {
-        const game = db.ludoGames.get(matchId);
-        if (!game) {
-          console.log('ROLL: game not found', { matchId });
-          return;
-        }
-        if (game.status !== 'PLAYING') {
-          console.log('ROLL: game not in PLAYING state', { matchId, status: game.status });
-          return;
-        }
-        if (game.diceHasRolled) {
-          console.log('ROLL: dice already rolled', { matchId });
-          return;
-        }
-
-        // Validate socket user owns current turn
-        const socketUserId = socket.user?._id?.toString();
-        const turnUserId = game.turn === 'red' 
-          ? game.players.red?.userId?.toString() 
-          : game.players.yellow?.userId?.toString();
-
-        if (socketUserId !== turnUserId) {
-          console.warn(`Unauthenticated ROLL request by ${socketUserId} on turn ${turnUserId}`);
-          return;
-        }
-
-        await LudoService.roll(matchId, socket.user);
-        console.log("RESULT_SENT", Date.now());
-      } catch (err) {
-        console.error("Socket ROLL error:", err);
-      }
-    });
-
-    socket.on('MOVE', async (data) => {
-      const { matchId, tokenId } = data;
-      console.log('MOVE_TOKEN_RECEIVED', { matchId, tokenId, socketId: socket.id, user: socket.user?._id });
-      try {
-        const game = db.ludoGames.get(matchId);
-        if (!game) {
-          console.log('MOVE: game not found', { matchId });
-          return;
-        }
-        if (game.status !== 'PLAYING') {
-          console.log('MOVE: game not in PLAYING state', { matchId, status: game.status });
-          return;
-        }
-        if (!game.diceHasRolled || game.diceRoll === null) {
-          console.log('MOVE: dice not rolled', { matchId });
-          return;
-        }
-
-        // Validate socket user owns current turn
-        const socketUserId = socket.user?._id?.toString();
-        const turnUserId = game.turn === 'red' 
-          ? game.players.red?.userId?.toString() 
-          : game.players.yellow?.userId?.toString();
-
-        if (socketUserId !== turnUserId) {
-          console.warn(`Unauthenticated MOVE request by ${socketUserId} on turn ${turnUserId}`);
-          return;
-        }
-
-        await LudoService.move(matchId, socket.user, tokenId);
-
-        if (game.status === 'FINISHED') {
-          ludoNamespace.to(matchId).emit('GAME_ENDED', { roomId: matchId, winner: game.winner });
-          ludoNamespace.to(matchId).emit('WINNER_DECLARED', { winner: game.winner, prize: game.winningPrize, roomId: matchId });
-        }
-      } catch (err) {
-        console.error("Socket MOVE error:", err);
-      }
-    });
-
-    socket.on('TIMEOUT', async (data) => {
-      const { matchId } = data;
-      console.log('TIMEOUT_RECEIVED', { matchId, socketId: socket.id, user: socket.user?._id });
-      try {
-        const game = db.ludoGames.get(matchId);
-        if (!game || game.status !== 'PLAYING') return;
-
-        // Validate socket user owns current turn
-        const socketUserId = socket.user?._id?.toString();
-        const turnUserId = game.turn === 'red' 
-          ? game.players.red?.userId?.toString() 
-          : game.players.yellow?.userId?.toString();
-
-        if (socketUserId !== turnUserId) {
-          console.warn(`Unauthenticated TIMEOUT request by ${socketUserId} on turn ${turnUserId}`);
-          return;
-        }
-
-        await LudoService.timeout(matchId, socket.user);
-
-        if (game.status === 'FINISHED') {
-          ludoNamespace.to(matchId).emit('GAME_ENDED', { roomId: matchId, winner: game.winner });
-          ludoNamespace.to(matchId).emit('WINNER_DECLARED', { winner: game.winner, prize: game.winningPrize, roomId: matchId });
-        }
-      } catch (err) {
-        console.error("Socket TIMEOUT error:", err);
-      }
-    });
-
-    socket.on('LEAVE_GAME', async (data) => {
-      const { matchId } = data;
-      console.log('LEAVE_GAME_RECEIVED', { matchId, socketId: socket.id, user: socket.user?._id });
-      try {
-        const game = db.ludoGames.get(matchId);
-        if (!game || game.status === 'FINISHED') return;
-
-        await LudoService.leave(matchId, socket.user);
-
-        ludoNamespace.to(matchId).emit('GAME_ENDED', { roomId: matchId, winner: game.winner });
-        ludoNamespace.to(matchId).emit('WINNER_DECLARED', { winner: game.winner, prize: game.winningPrize, roomId: matchId });
-        ludoNamespace.to(matchId).emit('PLAYER_LEFT', { playerId: socket.user?._id?.toString(), roomId: matchId });
-        
-        socket.leave(matchId);
-        console.log('SOCKET_LEFT_ROOM', { socketId: socket.id, matchId });
-      } catch (err) {
-        console.error("Socket LEAVE_GAME error:", err);
-      }
-    });
-
-    socket.on('disconnect', () => {
-      console.log('Ludo client disconnected:', socket.id);
-      if (userId) {
-        // Only delete from onlineUsers if this is still the active socket
-        if (global.onlineUsers.get(userId) === socket.id) {
-            global.onlineUsers.delete(userId);
-        }
-        
-        // Remove from matchmaking queue if they disconnect
-        if (global.__matchmakingQueue) {
-          for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
-            const idx = queue.findIndex(item => item.user._id.toString() === userId);
-            if (idx !== -1) {
-              const item = queue[idx];
-              queue.splice(idx, 1);
-              if (queue.length === 0) {
-                global.__matchmakingQueue.delete(queueKey);
-              } else {
-                global.__matchmakingQueue.set(queueKey, queue);
-              }
-              // Update queue state
-              if (global.ludoNamespace) {
-                ArenaStatusManager.syncState(queueKey, global.__matchmakingQueue.get(queueKey));
-              }
-              console.log('REMOVED_FROM_QUEUE_ON_DISCONNECT', { userId, queueKey });
-              break;
+      for (const [k, q] of global.__matchmakingQueue.entries()) {
+        if (k !== queueKey) {
+          const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
+          if (idx !== -1) {
+            console.log('CLEANING_UP_DUPLICATE_QUEUE', { queueKey: k, userId: userIdStr });
+            const item = q[idx];
+            q.splice(idx, 1);
+            if (q.length === 0) {
+              global.__matchmakingQueue.delete(k);
+            } else {
+              global.__matchmakingQueue.set(k, q);
             }
+            broadcastLudoQueueUpdate(k);
           }
         }
       }
+
+      const waitingIndex = queue.findIndex(item => item.user._id.toString() !== userIdStr);
+      if (waitingIndex !== -1) {
+        const opponentItem = queue[waitingIndex];
+        // Remove opponent from queue
+        queue.splice(waitingIndex, 1);
+        if (queue.length === 0) global.__matchmakingQueue.delete(queueKey);
+        else global.__matchmakingQueue.set(queueKey, queue);
+
+        const game = opponentItem.game;
+        
+        // Add user to opponent's game
+        game.players.yellow = {
+            userId: user._id,
+            username: user.username,
+            avatar: user.avatar,
+            color: 'yellow'
+        };
+        game.status = 'PLAYING_PENDING';
+        
+        // Clear refund timeout for opponent
+        const refundTimer = global.__matchmakingRefunds.get(game.matchId);
+        if (refundTimer) {
+            clearTimeout(refundTimer);
+            global.__matchmakingRefunds.delete(game.matchId);
+        }
+
+        // Notify queue and update pool
+        broadcastLudoQueueUpdate(queueKey);
+        ArenaStatusManager.joinPool(queueKey);
+
+        if (global.io) {
+            StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+        }
+
+        // Notify waiting player (opponent)
+        if (global.ludoNamespace) {
+            const aSocketId = global.onlineUsers.get(opponentItem.user._id.toString());
+            if (aSocketId) {
+                const aSocket = global.ludoNamespace.sockets.get(aSocketId);
+                if (aSocket) {
+                    aSocket.emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
+                    aSocket.emit('GAME_UPDATE', game);
+                }
+            }
+        }
+
+        console.log('MATCH_CREATED_FROM_QUEUE', {
+            queueKey,
+            matchId: game.matchId,
+            red: opponentItem.user._id.toString(),
+            yellow: userIdStr
+        });
+
+        return { ...game, status: 'MATCHMAKING' };
+      }
+
+      const game = createLudoRoom(user, normalizedVariant, fee);
+      const freshQueue = global.__matchmakingQueue.get(queueKey) || [];
+      freshQueue.push({ user, game });
+      global.__matchmakingQueue.set(queueKey, freshQueue);
+      broadcastLudoQueueUpdate(queueKey);
+
       if (global.io) {
         StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
       }
-      ArenaStatusManager.broadcastOnlineUsersUpdate();
+
+      console.log('NEW_MATCHMAKING_ROOM_CREATED', {
+        queueKey,
+        matchId: game.matchId,
+        userId: userIdStr,
+        variant: normalizedVariant,
+        entryFee: fee
+      });
+      console.log('QUEUE_AFTER_JOIN', {
+        queueKey,
+        queueLength: freshQueue.length,
+        waitingRoomIds: freshQueue.map(item => item.game.matchId)
+      });
+
+      const refundTimeout = setTimeout(async () => {
+        try {
+          if (game.status === 'MATCHMAKING') {
+            game.status = 'CANCELLED';
+            const q = global.__matchmakingQueue.get(queueKey) || [];
+            const qIdx = q.findIndex(i => i.user._id.toString() === userIdStr);
+            if (qIdx !== -1) {
+              q.splice(qIdx, 1);
+              if (q.length === 0) global.__matchmakingQueue.delete(queueKey);
+              else global.__matchmakingQueue.set(queueKey, q);
+              broadcastLudoQueueUpdate(queueKey);
+            }
+          }
+          if (user.depositBalance >= fee) {
+            user.depositBalance += fee;
+          } else {
+            user.winningsBalance = Math.max(0, user.winningsBalance + fee);
+          }
+          user.walletBalance = Math.max(0, user.walletBalance + fee);
+          try {
+            await user.save();
+          } catch (err) {
+            console.warn('Refund save failed', err);
+          }
+          try {
+            const { addTransaction } = await import('../wallet/transaction.service.js');
+            addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${normalizedVariant})` }, user);
+          } catch (err) {
+            console.warn('Refund txn failed', err);
+          }
+
+          console.log('MATCHMAKING_REFUND_ISSUED', { user: userIdStr, fee, matchId: game.matchId });
+        } catch (err) {
+          console.error('Error in refund timeout', err);
+        }
+      }, 75000);
+
+      global.__matchmakingRefunds.set(game.matchId, refundTimeout);
+
+      return {
+        ...game,
+        status: 'MATCHMAKING'
+      };
     });
-  });
+  }
+
+  static getGame(id) {
+    return getLudoRoom(id);
+  }
+  static roll(id, user) {
+    const game = getLudoRoom(id);
+    if (!game) throw new Error("Game not found.");
+    if (game.status === 'FINISHED') throw new Error("Game has already concluded.");
+    if (game.diceHasRolled) throw new Error("You already rolled standard dice.");
+
+    const roll = rollDice();
+    game.diceRoll = roll;
+    game.diceHasRolled = true;
+    game.logs.unshift(`${game.turn === 'red' ? 'You' : 'Opponent'} rolled a ${roll}!`);
+    game.turnTimerRemaining = 18;
+
+    const hasMoves = hasAnyPlayableMoves(game.tokens, game.turn, roll);
+    if (!hasMoves) {
+      game.logs.unshift(`No playable moves for ${game.turn === 'red' ? 'You' : 'Opponent'}. Turn switches!`);
+      game.diceHasRolled = false;
+      game.diceRoll = null;
+      game.turn = game.turn === 'red' ? 'yellow' : 'red';
+      game.turnTimerRemaining = 18;
+      if (game.variant === 'TURN') game.movesRemaining -= 1;
+    }
+    broadcastGameUpdate(game);
+    return game;
+  } static async move(id, user, tokenId) {
+    const game = getLudoRoom(id);
+    if (!game) throw new Error("Game not found.");
+    if (!game.diceHasRolled || game.diceRoll === null) throw new Error("Please roll the dice first.");
+
+    const tok = game.tokens.find(t => t.id === tokenId);
+    if (!tok) throw new Error("Token not found.");
+    if (tok.color !== game.turn) throw new Error("It is not your token to move.");
+
+    const roll = game.diceRoll;
+    if (!canTokenMove(tok, roll)) {
+      throw new Error("Invalid move: overshoot or base escape without a 6.");
+    }
+
+    moveToken(tok, roll);
+    game.logs.unshift(`${tok.color === 'red' ? 'You' : 'Opponent'} moved token to position ${tok.position}.`);
+
+    game.turnTimerRemaining = 18;
+
+    if (!game.scores) game.scores = { red: 0, yellow: 0 };
+    game.scores.red = calculatePlayerScore(game, 'red');
+    game.scores.yellow = calculatePlayerScore(game, 'yellow');
+    console.log('SCORE_UPDATED', game.scores);
+
+    // Home scoring log (scores are authoritative from token progress)
+    if (tok.position === 57 && tok.prevPosition < 57) {
+      game.logs.unshift(`🏠 Home! ${tok.color === 'red' ? 'You' : 'Opponent'} reached the home center!`);
+    }
+
+    const captured = evaluateCaptures(game, tok);
+
+    // Recalculate in case of captures
+    game.scores.red = calculatePlayerScore(game, 'red');
+    game.scores.yellow = calculatePlayerScore(game, 'yellow');
+
+    const isWin = hasAllTokensReachedHome(game.tokens, tok.color);
+
+    if (isWin) {
+      game.logs.unshift(`👑 ${tok.color === 'red' ? 'You' : 'Opponent'} achieved ultimate Victory!`);
+      await finishGameAndAward(game, tok.color);
+      broadcastGameUpdate(game);
+      return game;
+    }
+
+    switchTurn(game, roll, captured);
+
+    // Ensure dice flags are reset for the next player (defensive - switchTurn should handle this)
+    try {
+      game.diceHasRolled = false;
+      game.diceRoll = null;
+    } catch (err) {
+      console.warn('Failed resetting dice flags after switchTurn', err);
+    }
+
+    if (game.variant === 'TURN') {
+      game.movesRemaining -= 1;
+      if (game.movesRemaining <= 0) {
+        const winnerColor = evaluateWinnerByScore(game);
+        await finishGameAndAward(game, winnerColor);
+        const redScore = game.scores?.red || 0;
+        const yellowScore = game.scores?.yellow || 0;
+        game.logs.unshift(`Turns dry! Score counts: Red:${redScore} Yellow:${yellowScore}`);
+      }
+    }
+    broadcastGameUpdate(game);
+    return game;
+  }
+
+  static async timeout(id, user) {
+    const game = getLudoRoom(id);
+    if (!game) throw new Error("Game not found.");
+    if (game.status === 'FINISHED') throw new Error("Game has already concluded.");
+
+    const timingColor = game.turn;
+    game.logs.unshift(`⏰ Timeout! ${timingColor === 'red' ? 'You' : 'Opponent'} missed their turn limit (18s).`);
+
+    if (timingColor === 'red') {
+      game.redLives = Math.max(0, game.redLives - 1);
+      if (game.redLives <= 0) {
+        game.logs.unshift(`💔 3 Lives lost! Red lost by timeout.`);
+        await finishGameAndAward(game, 'yellow');
+        broadcastGameUpdate(game);
+        return game;
+      }
+    } else {
+      game.yellowLives = Math.max(0, game.yellowLives - 1);
+      if (game.yellowLives <= 0) {
+        game.logs.unshift(`🎉 Opponent lost 3 lives! Red won by opponent timeout!`);
+        await finishGameAndAward(game, 'red');
+        broadcastGameUpdate(game);
+        return game;
+      }
+    }
+
+    game.diceHasRolled = false;
+    game.diceRoll = null;
+    game.turn = game.turn === 'red' ? 'yellow' : 'red';
+
+    if (game.variant === 'TURN') {
+      game.movesRemaining -= 1;
+      if (game.movesRemaining <= 0) {
+        const winnerColor = evaluateWinnerByScore(game);
+        await finishGameAndAward(game, winnerColor);
+        const redScore = game.scores?.red || 0;
+        const yellowScore = game.scores?.yellow || 0;
+        game.logs.unshift(`Turns Dry! RedScore:${redScore} vs YellowScore:${yellowScore}`);
+      }
+    }
+    broadcastGameUpdate(game);
+    return game;
+  }
+
+  static async endTimeMode(id, user) {
+    const game = getLudoRoom(id);
+    if (!game) throw new Error("Game not found.");
+    if (game.status === 'FINISHED') throw new Error("Game already finished.");
+
+    const winnerColor = evaluateWinnerByScore(game);
+    await finishGameAndAward(game, winnerColor);
+
+    const redScore = game.scores?.red || 0;
+    const yellowScore = game.scores?.yellow || 0;
+    game.logs.unshift(`⏱️ Time's up! points tally: Red: ${redScore} | Yellow: ${yellowScore}`);
+
+    // Broadcast full update and emit final events if namespace available
+    broadcastGameUpdate(game);
+    try {
+      if (global.ludoNamespace) {
+        global.ludoNamespace.to(game.matchId).emit('GAME_ENDED', { roomId: game.matchId, winner: winnerColor });
+        global.ludoNamespace.to(game.matchId).emit('WINNER_DECLARED', { winner: winnerColor, prize: game.winningPrize, roomId: game.matchId });
+      }
+    } catch (err) {
+      console.warn('Failed to emit GAME_ENDED/WINNER_DECLARED in endTimeMode', err);
+    }
+
+    return game;
+  }
+
+  static async leave(id, user) {
+    const game = getLudoRoom(id);
+    if (!game) throw new Error("Game not found.");
+    if (game.status === 'FINISHED') throw new Error("Game already finished.");
+
+    const color = game.players.red.userId.toString() === user._id.toString() ? 'red' : 'yellow';
+    const opponentColor = color === 'red' ? 'yellow' : 'red';
+
+    game.logs.unshift(`🚪 Player ${color === 'red' ? 'You' : 'Opponent'} folded/left.`);
+    await finishGameAndAward(game, opponentColor);
+    broadcastGameUpdate(game);
+    return game;
+  }
+
+  static async cancelMatchmaking(user) {
+    if (!global.__matchmakingQueue) {
+      global.__matchmakingQueue = new Map();
+    }
+    if (!global.__matchmakingCancels) {
+      global.__matchmakingCancels = new Set();
+    }
+    const userIdStr = user._id.toString();
+    global.__matchmakingCancels.add(userIdStr);
+    console.log("CANCEL_MATCHMAKING_REQUEST", userIdStr);
+
+    for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
+      const idx = queue.findIndex(item => item.user._id.toString() === userIdStr);
+      if (idx !== -1) {
+        const item = queue[idx];
+        const fee = Number(item.game.entryFee || 0);
+        const matchId = item.game.matchId;
+
+        // Remove from queue
+        queue.splice(idx, 1);
+        if (queue.length === 0) {
+          global.__matchmakingQueue.delete(queueKey);
+        } else {
+          global.__matchmakingQueue.set(queueKey, queue);
+        }
+        broadcastLudoQueueUpdate(queueKey);
+
+        // Clear refund timeout
+        const refundTimer = global.__matchmakingRefunds.get(matchId);
+        if (refundTimer) {
+          clearTimeout(refundTimer);
+          global.__matchmakingRefunds.delete(matchId);
+        }
+
+        // Delete the room from in-memory DB to prevent ghost matchmaking
+        db.ludoGames.delete(matchId);
+
+        if (!Number.isFinite(fee) || fee <= 0) {
+          console.warn('Invalid matchmaking fee during cancel:', item.game.entryFee, matchId);
+          return { success: false, message: 'Invalid matchmaking fee.' };
+        }
+
+        if (global.__matchmakingCancels.has(userIdStr)) {
+          global.__matchmakingCancels.delete(userIdStr);
+        }
+
+        // Refund user immediately using same refund logic as timeout/refund path
+        if (user.depositBalance >= fee) {
+          user.depositBalance += fee;
+        } else {
+          user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+        }
+        user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
+        await user.save();
+
+        // Record transaction
+        try {
+          const { addTransaction } = await import('../wallet/transaction.service.js');
+          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
+        } catch (err) {
+          console.warn('Failed to add transaction for matchmaking cancellation refund', err);
+        }
+
+        console.log("MATCHMAKING_CANCELLED_SUCCESS", userIdStr, "Match ID:", matchId, "Refunded:", fee);
+        return { success: true, refunded: fee };
+      }
+    }
+
+    return { success: true, message: "Cancellation requested. Matchmaking will be stopped if it is still pending." };
+  }
 }

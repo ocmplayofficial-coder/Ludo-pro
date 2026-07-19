@@ -64,6 +64,7 @@ async function finishGameAndAward(game, winnerColor) {
   db.ludoGames.delete(game.matchId);
   const queueKey = `${game.entryFee}:${game.variant}`;
   broadcastLudoQueueUpdate(queueKey);
+  ArenaStatusManager.leavePool(queueKey);
   
   if (global.io) {
     StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
@@ -317,6 +318,7 @@ export class LudoService {
         const game = waiting.game;
         game.players.yellow = { userId: user._id, username: user.username, avatar: user.avatar };
         game.status = 'PLAYING_PENDING';
+        ArenaStatusManager.joinPool(queueKey);
         game.waitingForPlayers = true;
 
         try {

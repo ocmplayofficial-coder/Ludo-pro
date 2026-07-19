@@ -4,81 +4,95 @@
  * Tracks waitingCount (players in matchmaking queue) and playingCount (players currently in active matches).
  */
 export class ArenaStatusManager {
-    static state = {}; // key: queueKey -> { waitingCount: number, playingCount: number }
+    static state = {}; // key: queueKey -> { waitingCount: number, playingCount: number, activeMatchCount: number }
 
     static initQueue(queueKey) {
         if (!this.state[queueKey]) {
-            this.state[queueKey] = { waitingCount: 0, playingCount: 0 };
+            this.state[queueKey] = { waitingCount: 0, playingCount: 0, activeMatchCount: 0 };
         }
     }
 
-    /**
-     * Recomputes and broadcasts the state for a specific queueKey based strictly on the queue.
-     * @param {string} queueKey - e.g. "10:CLASSIC"
-     * @param {Array} currentQueue - The current array of players waiting in this queue
-     */
     static syncState(queueKey, currentQueue) {
         this.initQueue(queueKey);
         const waitingCount = currentQueue ? currentQueue.length : 0;
-        // playingCount remains unchanged here; only waitingCount is updated from the queue
         this.state[queueKey].waitingCount = waitingCount;
         this.broadcast(queueKey);
     }
 
     static joinPool(queueKey) {
         this.initQueue(queueKey);
-        this.state[queueKey].playingCount += 1;
+        this.state[queueKey].playingCount += 2;
+        this.state[queueKey].activeMatchCount = (this.state[queueKey].activeMatchCount || 0) + 1;
         this.broadcast(queueKey);
     }
 
     static leavePool(queueKey) {
         this.initQueue(queueKey);
-        if (this.state[queueKey].playingCount > 0) {
-            this.state[queueKey].playingCount -= 1;
+        if (this.state[queueKey].playingCount >= 2) {
+            this.state[queueKey].playingCount -= 2;
+        } else if (this.state[queueKey].playingCount > 0) {
+            this.state[queueKey].playingCount = 0;
+        }
+        if (this.state[queueKey].activeMatchCount > 0) {
+            this.state[queueKey].activeMatchCount -= 1;
         }
         this.broadcast(queueKey);
     }
 
+    static getOnlineUsersStats() {
+        let classic = 0;
+        let time = 0;
+        let turn = 0;
+
+        for (const [queueKey, queueState] of Object.entries(this.state)) {
+            const players = queueState.waitingCount + queueState.playingCount;
+            if (queueKey.includes('CLASSIC')) {
+                classic += players;
+            } else if (queueKey.includes('TIME')) {
+                time += players;
+            } else if (queueKey.includes('TURN')) {
+                turn += players;
+            }
+        }
+        
+        const total = global.onlineUsers ? global.onlineUsers.size : 0;
+        return { classic, time, turn, total };
+    }
+
+    static broadcastOnlineUsersUpdate() {
+        if (!global.ludoNamespace) return;
+        global.ludoNamespace.emit('onlineUsersUpdate', this.getOnlineUsersStats());
+    }
+
     static broadcast(queueKey) {
         if (!global.ludoNamespace) return;
-        const { waitingCount, playingCount } = this.state[queueKey];
-        let status = 'empty';
-        const players = waitingCount + playingCount;
-        if (players === 0) {
-            status = 'empty';
-        } else if (waitingCount === 1 && playingCount === 0) {
-            status = 'waiting';
-        } else if (waitingCount >= 2 && playingCount === 0) {
-            status = 'starting';
-        } else if (playingCount >= 1) {
-            status = 'playing';
-        }
-        console.log('BROADCAST_QUEUE_UPDATED', { queueKey, players, waitingCount, playingCount, status });
-        global.ludoNamespace.emit('queueUpdated', {
+        const { waitingCount, playingCount, activeMatchCount } = this.state[queueKey];
+        
+        const payload = {
             queueKey,
-            players,
             waitingCount,
             playingCount,
-            status
-        });
+            activeMatchCount: activeMatchCount || 0,
+            timestamp: Date.now()
+        };
+
+        console.log('BROADCAST_QUEUE_UPDATED', payload);
+        global.ludoNamespace.emit('queueUpdated', payload);
+        this.broadcastOnlineUsersUpdate();
     }
 
     static broadcastAll(socket) {
-        // Broadcast for any queues that have people waiting or playing
         for (const [queueKey, state] of Object.entries(this.state)) {
-            const { waitingCount, playingCount } = state;
-            const players = waitingCount + playingCount;
-            let status = 'empty';
-            if (players === 0) {
-                status = 'empty';
-            } else if (waitingCount === 1 && playingCount === 0) {
-                status = 'waiting';
-            } else if (waitingCount >= 2 && playingCount === 0) {
-                status = 'starting';
-            } else if (playingCount >= 1) {
-                status = 'playing';
-            }
-            socket.emit('queueUpdated', { queueKey, players, waitingCount, playingCount, status });
+            const { waitingCount, playingCount, activeMatchCount } = state;
+            const payload = {
+                queueKey,
+                waitingCount,
+                playingCount,
+                activeMatchCount: activeMatchCount || 0,
+                timestamp: Date.now()
+            };
+            socket.emit('queueUpdated', payload);
         }
+        socket.emit('onlineUsersUpdate', this.getOnlineUsersStats());
     }
 }

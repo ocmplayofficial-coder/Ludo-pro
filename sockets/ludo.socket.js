@@ -2,6 +2,7 @@ import { db } from '../config/db.js';
 import { UserModel } from '../models/user.model.js';
 import { LudoService } from '../services/ludo.service.js';
 import { StatsService } from '../services/stats.service.js';
+import { ArenaStatusManager } from '../game-engine/ludo/ArenaStatusManager.js';
 
 function getPendingLudoGameForUser(userId) {
   if (!userId) return null;
@@ -81,6 +82,9 @@ export function handleLudoSocket(ludoNamespace) {
       console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
       tryAutoJoinPendingMatch(socket, ludoNamespace);
     }
+
+    // Broadcast current arena statuses to the newly connected client
+    ArenaStatusManager.broadcastAll(socket);
 
     socket.on('JOIN_GAME', (data) => {
       const { matchId } = data;
@@ -338,6 +342,28 @@ export function handleLudoSocket(ludoNamespace) {
       console.log('Ludo client disconnected:', socket.id);
       if (userId) {
         global.onlineUsers.delete(userId);
+        
+        // Remove from matchmaking queue if they disconnect
+        if (global.__matchmakingQueue) {
+          for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
+            const idx = queue.findIndex(item => item.user._id.toString() === userId);
+            if (idx !== -1) {
+              const item = queue[idx];
+              queue.splice(idx, 1);
+              if (queue.length === 0) {
+                global.__matchmakingQueue.delete(queueKey);
+              } else {
+                global.__matchmakingQueue.set(queueKey, queue);
+              }
+              // Update queue state
+              if (global.ludoNamespace) {
+                ArenaStatusManager.syncState(queueKey, global.__matchmakingQueue.get(queueKey));
+              }
+              console.log('REMOVED_FROM_QUEUE_ON_DISCONNECT', { userId, queueKey });
+              break;
+            }
+          }
+        }
       }
       if (global.io) {
         StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));

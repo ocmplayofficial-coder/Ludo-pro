@@ -148,23 +148,8 @@ export function handleLudoSocket(ludoNamespace) {
       game.bothPlayersJoined = bothPlayersJoined;
       console.log("PLAYERS_JOINED_STATUS", { matchId, bothPlayersJoined, roomSize });
 
-      const joinedPayload = {
-        playerId: socketUserId,
-        players: game.players,
-        roomId: matchId
-      };
-      console.log('EMITTING TO ROOM (PLAYER_JOINED)', matchId);
-      ludoNamespace.to(matchId).emit('PLAYER_JOINED', joinedPayload);
-      console.log('PLAYER_JOINED_EMITTED', { matchId, payload: joinedPayload });
-
-      try {
-        socket.emit('PLAYER_JOINED', joinedPayload);
-        socket.emit('GAME_UPDATE', game);
-        socket.emit('MATCH_FOUND', { roomId: matchId, players: game.players });
-        console.log('DIRECT_EMITS_TO_JOINER_SENT', { socketId: socket.id, matchId });
-      } catch (err) {
-        console.warn('Failed direct emit to joiner', err);
-      }
+      // Do not duplicate emits. Send only to socket if late joiner.
+      // But we will handle full room emit if the match starts.
 
       // Log game status for diagnostics
       console.log('GAME_STATUS', { matchId, status: game.status });
@@ -367,7 +352,7 @@ export function handleLudoSocket(ludoNamespace) {
             global.onlineUsers.delete(userId);
         }
         
-        // Remove from matchmaking queue if they disconnect
+        // 1. Remove from matchmaking queue if they disconnect
         if (global.__matchmakingQueue) {
           let wasInQueue = false;
           for (const queue of global.__matchmakingQueue.values()) {
@@ -383,6 +368,14 @@ export function handleLudoSocket(ludoNamespace) {
               }
             }).catch(err => console.error('Disconnect findById error:', err));
           }
+        }
+
+        // 2. If in PLAYING_PENDING match (waiting for connection), gracefully abort it so opponent doesn't wait 20s
+        const pendingGame = getPendingLudoGameForUser(userId);
+        if (pendingGame && pendingGame.status === 'PLAYING_PENDING') {
+           const queueKey = pendingGame.entryFee && pendingGame.variant ? `${pendingGame.entryFee}:${pendingGame.variant.toUpperCase()}` : null;
+           LudoService.abortPendingMatch(pendingGame.matchId, 'Opponent disconnected while connecting.', queueKey, pendingGame.entryFee)
+             .catch(e => console.error('Error aborting pending match on disconnect', e));
         }
       }
       if (global.io) {

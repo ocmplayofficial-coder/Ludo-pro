@@ -28,6 +28,31 @@ function broadcastLudoQueueUpdate(queueKey) {
   }
 }
 
+function isUserInAnyGameOrQueue(userIdStr) {
+  // 1. Check all matchmaking queues
+  if (global.__matchmakingQueue) {
+    for (const [key, queue] of global.__matchmakingQueue.entries()) {
+      if (queue.some(item => item.user._id.toString() === userIdStr)) {
+        return true;
+      }
+    }
+  }
+
+  // 2. Check all active/pending games
+  if (db.ludoGames) {
+    for (const game of db.ludoGames.values()) {
+      if (game.status === 'FINISHED' || game.status === 'CANCELLED') continue;
+      const redId = game.players?.red?.userId?.toString();
+      const yellowId = game.players?.yellow?.userId?.toString();
+      if (redId === userIdStr || yellowId === userIdStr) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 function withMatchmakingLock(queueKey, callback) {
   if (!global.__matchmakingLocks) {
     global.__matchmakingLocks = new Map();
@@ -205,57 +230,48 @@ export class LudoService {
       throw new Error('Invalid entry fee.');
     }
 
-    if (user.walletBalance < fee) throw new Error('Insufficient wallet balance.');
-    if (user.depositBalance >= fee) {
-      user.depositBalance -= fee;
-    } else {
-      const rest = fee - user.depositBalance;
-      user.depositBalance = 0;
-      user.winningsBalance = Math.max(0, user.winningsBalance - rest);
-    }
-    user.walletBalance = Math.max(0, user.walletBalance - fee);
-
-    try {
-      await user.save();
-    } catch (err) {
-      console.warn('[MM] Failed to persist user balance after matchmaking deduction', err);
-    }
-
-    if (!global.__matchmakingCancels) {
-      global.__matchmakingCancels = new Set();
-    }
-    if (global.__matchmakingCancels.has(userIdStr)) {
-      global.__matchmakingCancels.delete(userIdStr);
-      console.log('[MM] MATCHMAKING_CANCELLED_BEFORE_QUEUE', { userId: userIdStr, fee, queueKey });
-      if (user.depositBalance >= fee) {
-        user.depositBalance += fee;
-      } else {
-        user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+    return await withMatchmakingLock(queueKey, async () => {
+      // 1. Strict duplicate check (Spam Protection)
+      // Must happen inside lock to prevent race conditions during duplicate joins
+      if (isUserInAnyGameOrQueue(userIdStr)) {
+        console.log('[MM] SPAM_PROTECTION_REJECT', { userId: userIdStr, queueKey });
+        
+        // If they are in the queue, return their pending game
+        const queue = global.__matchmakingQueue.get(queueKey) || [];
+        const existingItem = queue.find(item => item.user._id.toString() === userIdStr);
+        if (existingItem) {
+           return { ...existingItem.game, status: 'MATCHMAKING' };
+        }
+        
+        // If they are in an active game, throw so frontend ignores
+        throw new Error("You are already in a match or queue.");
       }
-      user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
+
+      // 2. Deduct Fee
+      if (user.walletBalance < fee) throw new Error('Insufficient wallet balance.');
+      if (user.depositBalance >= fee) {
+        user.depositBalance -= fee;
+      } else {
+        const rest = fee - user.depositBalance;
+        user.depositBalance = 0;
+        user.winningsBalance = Math.max(0, user.winningsBalance - rest);
+      }
+      user.walletBalance = Math.max(0, user.walletBalance - fee);
+
       try {
         await user.save();
       } catch (err) {
-        console.warn('[MM] Refund save failed for cancelled matchmaking', err);
+        console.warn('[MM] Failed to persist user balance after matchmaking deduction', err);
       }
+
       try {
         const { addTransaction } = await import('../wallet/transaction.service.js');
-        addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
+        addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${normalizedVariant})` }, user);
       } catch (err) {
-        console.warn('[MM] Refund txn failed for cancelled matchmaking', err);
+        console.warn('[MM] Failed to record matchmaking transaction', err);
       }
-      return { success: false, message: 'Matchmaking cancelled.' };
-    }
 
-    try {
-      const { addTransaction } = await import('../wallet/transaction.service.js');
-      addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${normalizedVariant})` }, user);
-    } catch (err) {
-      console.warn('[MM] Failed to record matchmaking transaction', err);
-    }
-
-    return await withMatchmakingLock(queueKey, async () => {
-      // Always read fresh from the Map inside the lock to avoid stale references
+      // Always read fresh from the Map inside the lock
       const queue = global.__matchmakingQueue.get(queueKey) || [];
 
       console.log('[MM] LOCK_ACQUIRED', {
@@ -264,35 +280,6 @@ export class LudoService {
         QUEUE_LENGTH: queue.length,
         waitingIds: queue.map(i => i.user._id.toString()),
       });
-
-      // Guard: check if this user is already waiting in THIS queue
-      const existingIndex = queue.findIndex(item => item.user._id.toString() === userIdStr);
-      if (existingIndex !== -1) {
-        const existingItem = queue[existingIndex];
-        console.log('[MM] PLAYER_ALREADY_IN_QUEUE', { queueKey, userId: userIdStr, matchId: existingItem.game.matchId });
-        console.log('[MM] LOCK_RELEASED (already in queue)');
-        return {
-          ...existingItem.game,
-          status: 'MATCHMAKING'
-        };
-      }
-
-      // Guard: remove user from any other queue (different queueKey) they may be in
-      for (const [k, q] of global.__matchmakingQueue.entries()) {
-        if (k !== queueKey) {
-          const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
-          if (idx !== -1) {
-            console.log('[MM] CLEANING_UP_DUPLICATE_QUEUE', { fromKey: k, userId: userIdStr });
-            q.splice(idx, 1);
-            if (q.length === 0) {
-              global.__matchmakingQueue.delete(k);
-            } else {
-              global.__matchmakingQueue.set(k, q);
-            }
-            broadcastLudoQueueUpdate(k);
-          }
-        }
-      }
 
       // -------------------------------------------------------
       // MATCH: find another user waiting in this queue
@@ -326,7 +313,7 @@ export class LudoService {
         };
         game.status = 'PLAYING_PENDING';
 
-        // Clear auto-refund timeout for opponent's slot
+        // Clear 75s auto-refund timeout for opponent's slot
         const refundTimer = global.__matchmakingRefunds.get(game.matchId);
         if (refundTimer) {
           clearTimeout(refundTimer);
@@ -336,41 +323,13 @@ export class LudoService {
         // Setup 20-second connection timeout to protect against ghost matches
         const connectionTimeout = setTimeout(async () => {
           try {
-            const checkGame = db.ludoGames.get(game.matchId);
-            if (checkGame && checkGame.status === 'PLAYING_PENDING') {
-              console.log('[MM] PLAYING_PENDING_TIMEOUT_REFUND', { matchId: game.matchId });
-              checkGame.status = 'CANCELLED';
-              db.ludoGames.delete(game.matchId);
-              ArenaStatusManager.leavePool(queueKey);
-              
-              if (global.ludoNamespace) {
-                global.ludoNamespace.to(game.matchId).emit('GAME_CANCELLED', { reason: 'Players failed to connect in time' });
-              }
-
-              // Refund Red
-              const redUser = await UserModel.findById(checkGame.players.red.userId);
-              if (redUser) {
-                if (redUser.depositBalance >= fee) redUser.depositBalance += fee;
-                else redUser.winningsBalance = Math.max(0, (redUser.winningsBalance || 0) + fee);
-                redUser.walletBalance = Math.max(0, (redUser.walletBalance || 0) + fee);
-                await redUser.save().catch(e => console.warn('Red refund save err', e));
-              }
-
-              // Refund Yellow
-              const yellowUser = await UserModel.findById(checkGame.players.yellow.userId);
-              if (yellowUser) {
-                if (yellowUser.depositBalance >= fee) yellowUser.depositBalance += fee;
-                else yellowUser.winningsBalance = Math.max(0, (yellowUser.winningsBalance || 0) + fee);
-                yellowUser.walletBalance = Math.max(0, (yellowUser.walletBalance || 0) + fee);
-                await yellowUser.save().catch(e => console.warn('Yellow refund save err', e));
-              }
-            }
+            await LudoService.abortPendingMatch(game.matchId, 'Players failed to connect in time', queueKey, fee);
           } catch (e) {
             console.error('[MM] Connection timeout error', e);
           }
         }, 20000);
         
-        global.__matchmakingRefunds.set(game.matchId, connectionTimeout);
+        global.__matchmakingRefunds.set(game.matchId, connectionTimeout); // Reusing the same map for the connection timeout is fine as the 75s one was cleared
 
         // Sync queue display and increment playing counters
         broadcastLudoQueueUpdate(queueKey);
@@ -400,11 +359,7 @@ export class LudoService {
               redSocket.emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
               redSocket.emit('GAME_UPDATE', game);
               console.log('[MM] MATCH_FOUND emitted to red (waiting player)', { socketId: redSocketId, matchId: game.matchId });
-            } else {
-              console.warn('[MM] Red socket not found in ludo namespace', { redSocketId, matchId: game.matchId });
             }
-          } else {
-            console.warn('[MM] Red player not in onlineUsers map', { userId: opponentItem.user._id.toString(), matchId: game.matchId });
           }
 
           // Notify the joining player (yellow / D) via their personal socket room
@@ -415,11 +370,7 @@ export class LudoService {
               yellowSocket.emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
               yellowSocket.emit('GAME_UPDATE', game);
               console.log('[MM] MATCH_FOUND emitted to yellow (joining player)', { socketId: yellowSocketId, matchId: game.matchId });
-            } else {
-              console.warn('[MM] Yellow socket not found in ludo namespace', { yellowSocketId, matchId: game.matchId });
             }
-          } else {
-            console.warn('[MM] Yellow player not in onlineUsers map', { userId: userIdStr, matchId: game.matchId });
           }
         }
 
@@ -685,74 +636,118 @@ export class LudoService {
     return game;
   }
 
+  static async abortPendingMatch(matchId, reason, queueKey, fee) {
+    const checkGame = db.ludoGames.get(matchId);
+    if (!checkGame || checkGame.status !== 'PLAYING_PENDING') return;
+
+    console.log('[MM] ABORTING_PENDING_MATCH', { matchId, reason });
+    checkGame.status = 'CANCELLED';
+    db.ludoGames.delete(matchId);
+    
+    if (queueKey) {
+      ArenaStatusManager.leavePool(queueKey);
+    }
+    
+    if (global.ludoNamespace) {
+      global.ludoNamespace.to(matchId).emit('GAME_CANCELLED', { reason });
+    }
+
+    // Refund Red
+    if (checkGame.players?.red?.userId) {
+      const redUser = await UserModel.findById(checkGame.players.red.userId);
+      if (redUser) {
+        if (redUser.depositBalance >= fee) redUser.depositBalance += fee;
+        else redUser.winningsBalance = Math.max(0, (redUser.winningsBalance || 0) + fee);
+        redUser.walletBalance = Math.max(0, (redUser.walletBalance || 0) + fee);
+        await redUser.save().catch(e => console.warn('Red refund save err', e));
+        try {
+          const { addTransaction } = await import('../wallet/transaction.service.js');
+          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Match Aborted` }, redUser);
+        } catch(e) {}
+      }
+    }
+
+    // Refund Yellow
+    if (checkGame.players?.yellow?.userId) {
+      const yellowUser = await UserModel.findById(checkGame.players.yellow.userId);
+      if (yellowUser) {
+        if (yellowUser.depositBalance >= fee) yellowUser.depositBalance += fee;
+        else yellowUser.winningsBalance = Math.max(0, (yellowUser.winningsBalance || 0) + fee);
+        yellowUser.walletBalance = Math.max(0, (yellowUser.walletBalance || 0) + fee);
+        await yellowUser.save().catch(e => console.warn('Yellow refund save err', e));
+        try {
+          const { addTransaction } = await import('../wallet/transaction.service.js');
+          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Match Aborted` }, yellowUser);
+        } catch(e) {}
+      }
+    }
+  }
+
   static async cancelMatchmaking(user) {
-    if (!global.__matchmakingQueue) {
-      global.__matchmakingQueue = new Map();
-    }
-    if (!global.__matchmakingCancels) {
-      global.__matchmakingCancels = new Set();
-    }
+    if (!global.__matchmakingQueue) return { success: false, message: 'No active queue.' };
+    
     const userIdStr = user._id.toString();
-    global.__matchmakingCancels.add(userIdStr);
     console.log("CANCEL_MATCHMAKING_REQUEST", userIdStr);
 
     for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
       const idx = queue.findIndex(item => item.user._id.toString() === userIdStr);
       if (idx !== -1) {
-        const item = queue[idx];
-        const fee = Number(item.game.entryFee || 0);
-        const matchId = item.game.matchId;
+        // Enforce lock to prevent race condition during cancel
+        return await withMatchmakingLock(queueKey, async () => {
+          // Re-find inside lock
+          const q = global.__matchmakingQueue.get(queueKey) || [];
+          const currentIdx = q.findIndex(item => item.user._id.toString() === userIdStr);
+          if (currentIdx === -1) {
+             return { success: false, message: 'User already matched or removed.' };
+          }
+          
+          const item = q[currentIdx];
+          const fee = Number(item.game.entryFee || 0);
+          const matchId = item.game.matchId;
 
-        // Remove from queue
-        queue.splice(idx, 1);
-        if (queue.length === 0) {
-          global.__matchmakingQueue.delete(queueKey);
-        } else {
-          global.__matchmakingQueue.set(queueKey, queue);
-        }
-        broadcastLudoQueueUpdate(queueKey);
+          // 1. Remove from queue
+          q.splice(currentIdx, 1);
+          if (q.length === 0) {
+            global.__matchmakingQueue.delete(queueKey);
+          } else {
+            global.__matchmakingQueue.set(queueKey, q);
+          }
+          broadcastLudoQueueUpdate(queueKey);
 
-        // Clear refund timeout
-        const refundTimer = global.__matchmakingRefunds.get(matchId);
-        if (refundTimer) {
-          clearTimeout(refundTimer);
-          global.__matchmakingRefunds.delete(matchId);
-        }
+          // 2. Clear timer
+          const refundTimer = global.__matchmakingRefunds.get(matchId);
+          if (refundTimer) {
+            clearTimeout(refundTimer);
+            global.__matchmakingRefunds.delete(matchId);
+          }
 
-        // Delete the room from in-memory DB to prevent ghost matchmaking
-        db.ludoGames.delete(matchId);
+          // 3. Delete room
+          db.ludoGames.delete(matchId);
 
-        if (!Number.isFinite(fee) || fee <= 0) {
-          console.warn('Invalid matchmaking fee during cancel:', item.game.entryFee, matchId);
-          return { success: false, message: 'Invalid matchmaking fee.' };
-        }
+          if (!Number.isFinite(fee) || fee <= 0) {
+            return { success: false, message: 'Invalid matchmaking fee.' };
+          }
 
-        if (global.__matchmakingCancels.has(userIdStr)) {
-          global.__matchmakingCancels.delete(userIdStr);
-        }
+          // 4. Refund
+          if (user.depositBalance >= fee) {
+            user.depositBalance += fee;
+          } else {
+            user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
+          }
+          user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
+          await user.save();
 
-        // Refund user immediately using same refund logic as timeout/refund path
-        if (user.depositBalance >= fee) {
-          user.depositBalance += fee;
-        } else {
-          user.winningsBalance = Math.max(0, (user.winningsBalance || 0) + fee);
-        }
-        user.walletBalance = Math.max(0, (user.walletBalance || 0) + fee);
-        await user.save();
+          try {
+            const { addTransaction } = await import('../wallet/transaction.service.js');
+            addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
+          } catch (err) {}
 
-        // Record transaction
-        try {
-          const { addTransaction } = await import('../wallet/transaction.service.js');
-          addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
-        } catch (err) {
-          console.warn('Failed to add transaction for matchmaking cancellation refund', err);
-        }
-
-        console.log("MATCHMAKING_CANCELLED_SUCCESS", userIdStr, "Match ID:", matchId, "Refunded:", fee);
-        return { success: true, refunded: fee };
+          console.log("MATCHMAKING_CANCELLED_SUCCESS", userIdStr, "Match ID:", matchId, "Refunded:", fee);
+          return { success: true, refunded: fee };
+        });
       }
     }
 
-    return { success: true, message: "Cancellation requested. Matchmaking will be stopped if it is still pending." };
+    return { success: true, message: "Cancellation requested. User was not in queue." };
   }
 }

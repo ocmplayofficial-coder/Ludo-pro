@@ -193,13 +193,12 @@ export class LudoService {
     const normalizedVariant = String(variant || '').toUpperCase().trim();
     const fee = parseFloat(entryFee);
 
-    console.log('MATCHMAKING_REQUEST', {
+    console.log('[MM] MATCHMAKING_ENTER', {
       username: user.username,
       userId: userIdStr,
       variant: normalizedVariant,
       entryFee: fee,
       queueKey,
-      env: process.env.NODE_ENV || 'unknown'
     });
 
     if (!Number.isFinite(fee) || fee <= 0) {
@@ -219,7 +218,7 @@ export class LudoService {
     try {
       await user.save();
     } catch (err) {
-      console.warn('Failed to persist user balance after matchmaking deduction', err);
+      console.warn('[MM] Failed to persist user balance after matchmaking deduction', err);
     }
 
     if (!global.__matchmakingCancels) {
@@ -227,7 +226,7 @@ export class LudoService {
     }
     if (global.__matchmakingCancels.has(userIdStr)) {
       global.__matchmakingCancels.delete(userIdStr);
-      console.log('MATCHMAKING_CANCELLED_BEFORE_QUEUE', { userId: userIdStr, fee, queueKey });
+      console.log('[MM] MATCHMAKING_CANCELLED_BEFORE_QUEUE', { userId: userIdStr, fee, queueKey });
       if (user.depositBalance >= fee) {
         user.depositBalance += fee;
       } else {
@@ -237,13 +236,13 @@ export class LudoService {
       try {
         await user.save();
       } catch (err) {
-        console.warn('Refund save failed for cancelled matchmaking', err);
+        console.warn('[MM] Refund save failed for cancelled matchmaking', err);
       }
       try {
         const { addTransaction } = await import('../wallet/transaction.service.js');
         addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `Matchmaking Cancelled` }, user);
       } catch (err) {
-        console.warn('Refund txn failed for cancelled matchmaking', err);
+        console.warn('[MM] Refund txn failed for cancelled matchmaking', err);
       }
       return { success: false, message: 'Matchmaking cancelled.' };
     }
@@ -252,39 +251,38 @@ export class LudoService {
       const { addTransaction } = await import('../wallet/transaction.service.js');
       addTransaction({ type: 'ENTRY_FEE', amount: fee, method: `Ludo Matchmaking (${normalizedVariant})` }, user);
     } catch (err) {
-      console.warn('Failed to record matchmaking transaction', err);
+      console.warn('[MM] Failed to record matchmaking transaction', err);
     }
 
     return await withMatchmakingLock(queueKey, async () => {
+      // Always read fresh from the Map inside the lock to avoid stale references
       const queue = global.__matchmakingQueue.get(queueKey) || [];
-      console.log('QUEUE_BEFORE_JOIN', {
+
+      console.log('[MM] LOCK_ACQUIRED', {
         queueKey,
-        queueLength: queue.length,
-        waitingRoomIds: queue.map(item => item.game.matchId),
-        userId: userIdStr
+        userId: userIdStr,
+        QUEUE_LENGTH: queue.length,
+        waitingIds: queue.map(i => i.user._id.toString()),
       });
 
-      const sameQueue = queue;
-      const existingIndex = sameQueue.findIndex(item => item.user._id.toString() === userIdStr);
+      // Guard: check if this user is already waiting in THIS queue
+      const existingIndex = queue.findIndex(item => item.user._id.toString() === userIdStr);
       if (existingIndex !== -1) {
-        const existingItem = sameQueue[existingIndex];
-        console.log('PLAYER_ALREADY_IN_QUEUE', {
-          queueKey,
-          userId: userIdStr,
-          existingMatchId: existingItem.game.matchId
-        });
+        const existingItem = queue[existingIndex];
+        console.log('[MM] PLAYER_ALREADY_IN_QUEUE', { queueKey, userId: userIdStr, matchId: existingItem.game.matchId });
+        console.log('[MM] LOCK_RELEASED (already in queue)');
         return {
           ...existingItem.game,
           status: 'MATCHMAKING'
         };
       }
 
+      // Guard: remove user from any other queue (different queueKey) they may be in
       for (const [k, q] of global.__matchmakingQueue.entries()) {
         if (k !== queueKey) {
           const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
           if (idx !== -1) {
-            console.log('CLEANING_UP_DUPLICATE_QUEUE', { queueKey: k, userId: userIdStr });
-            const item = q[idx];
+            console.log('[MM] CLEANING_UP_DUPLICATE_QUEUE', { fromKey: k, userId: userIdStr });
             q.splice(idx, 1);
             if (q.length === 0) {
               global.__matchmakingQueue.delete(k);
@@ -296,84 +294,132 @@ export class LudoService {
         }
       }
 
+      // -------------------------------------------------------
+      // MATCH: find another user waiting in this queue
+      // -------------------------------------------------------
       const waitingIndex = queue.findIndex(item => item.user._id.toString() !== userIdStr);
       if (waitingIndex !== -1) {
-        if (global.ludoNamespace) {
-          global.ludoNamespace.emit('queueUpdated', { queueKey, players: 2, status: 'starting' });
-        }
+        const opponentItem = queue[waitingIndex];
 
-        const waiting = queue[waitingIndex];
+        // Remove opponent from queue BEFORE any async work
         queue.splice(waitingIndex, 1);
         if (queue.length === 0) {
           global.__matchmakingQueue.delete(queueKey);
         } else {
           global.__matchmakingQueue.set(queueKey, queue);
         }
-        
-        // Let the 'starting' status linger for 2.5s before broadcasting true queue state
-        setTimeout(() => {
-          broadcastLudoQueueUpdate(queueKey);
-        }, 2500);
 
-        const game = waiting.game;
-        game.players.yellow = { userId: user._id, username: user.username, avatar: user.avatar };
-        game.status = 'PLAYING_PENDING';
-        ArenaStatusManager.joinPool(queueKey);
-        game.waitingForPlayers = true;
-
-        try {
-          const timerKey = waiting.game.matchId;
-          const tId = global.__matchmakingRefunds.get(timerKey);
-          if (tId) {
-            clearTimeout(tId);
-            global.__matchmakingRefunds.delete(timerKey);
-          }
-        } catch (err) {
-          console.warn('Failed clearing refund timer for matched game', err);
-        }
-
-        console.log('MATCH_FOUND', {
+        console.log('[MM] PLAYER_REMOVED from queue', {
           queueKey,
-          selectedRoom: game.matchId,
-          waitingUserId: waiting.user._id.toString(),
-          joiningUserId: userIdStr
+          removedUserId: opponentItem.user._id.toString(),
+          QUEUE_LENGTH_AFTER: queue.length,
         });
 
-        if (global.ludoNamespace) {
-          console.log('EMITTING GAME_UPDATE and MATCH_FOUND to waiting players:', game.matchId);
-          global.ludoNamespace.to(game.matchId).emit('GAME_UPDATE', game);
-          global.ludoNamespace.to(waiting.user._id.toString()).emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
-          global.ludoNamespace.to(userIdStr).emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
-          global.ludoNamespace.to(waiting.user._id.toString()).emit('GAME_UPDATE', game);
-          global.ludoNamespace.to(userIdStr).emit('GAME_UPDATE', game);
+        const game = opponentItem.game;
+
+        // Assign joiner as yellow
+        game.players.yellow = {
+          userId: user._id,
+          username: user.username,
+          avatar: user.avatar,
+          color: 'yellow'
+        };
+        game.status = 'PLAYING_PENDING';
+
+        // Clear auto-refund timeout for opponent's slot
+        const refundTimer = global.__matchmakingRefunds.get(game.matchId);
+        if (refundTimer) {
+          clearTimeout(refundTimer);
+          global.__matchmakingRefunds.delete(game.matchId);
         }
 
-        return game;
+        // Sync queue display and increment playing counters
+        broadcastLudoQueueUpdate(queueKey);
+        ArenaStatusManager.joinPool(queueKey);
+
+        if (global.io) {
+          StatsService.emitStatsUpdate(global.io).catch(err => console.error('[MM] STATS_EMIT_ERROR', err));
+        }
+
+        console.log('[MM] PAIR_CREATED', {
+          queueKey,
+          ROOM_ID: game.matchId,
+          red: opponentItem.user._id.toString(),
+          yellow: userIdStr,
+          WAITING_COUNT: queue.length,
+          PLAYING_COUNT: ArenaStatusManager.state[queueKey]?.playingCount ?? '?',
+          ACTIVE_MATCHES: ArenaStatusManager.state[queueKey]?.activeMatchCount ?? '?',
+        });
+
+        // Notify BOTH players via socket so neither misses MATCH_FOUND
+        if (global.ludoNamespace) {
+          // Notify the waiting player (red / opponent)
+          const redSocketId = global.onlineUsers.get(opponentItem.user._id.toString());
+          if (redSocketId) {
+            const redSocket = global.ludoNamespace.sockets.get(redSocketId);
+            if (redSocket) {
+              redSocket.emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
+              redSocket.emit('GAME_UPDATE', game);
+              console.log('[MM] MATCH_FOUND emitted to red (waiting player)', { socketId: redSocketId, matchId: game.matchId });
+            } else {
+              console.warn('[MM] Red socket not found in ludo namespace', { redSocketId, matchId: game.matchId });
+            }
+          } else {
+            console.warn('[MM] Red player not in onlineUsers map', { userId: opponentItem.user._id.toString(), matchId: game.matchId });
+          }
+
+          // Notify the joining player (yellow / D) via their personal socket room
+          const yellowSocketId = global.onlineUsers.get(userIdStr);
+          if (yellowSocketId) {
+            const yellowSocket = global.ludoNamespace.sockets.get(yellowSocketId);
+            if (yellowSocket) {
+              yellowSocket.emit('MATCH_FOUND', { roomId: game.matchId, players: game.players });
+              yellowSocket.emit('GAME_UPDATE', game);
+              console.log('[MM] MATCH_FOUND emitted to yellow (joining player)', { socketId: yellowSocketId, matchId: game.matchId });
+            } else {
+              console.warn('[MM] Yellow socket not found in ludo namespace', { yellowSocketId, matchId: game.matchId });
+            }
+          } else {
+            console.warn('[MM] Yellow player not in onlineUsers map', { userId: userIdStr, matchId: game.matchId });
+          }
+        }
+
+        console.log('[MM] ROOM_CREATED (match from queue)', { ROOM_ID: game.matchId, queueKey });
+        console.log('[MM] QUEUE_AFTER_MATCH', {
+          queueKey,
+          QUEUE_LENGTH: global.__matchmakingQueue.get(queueKey)?.length ?? 0,
+        });
+        console.log('[MM] LOCK_RELEASED (match made)');
+
+        // Return PLAYING_PENDING so frontend knows the match is found
+        return { ...game, status: 'PLAYING_PENDING' };
       }
 
+      // -------------------------------------------------------
+      // WAIT: no opponent found — create a new room and wait
+      // -------------------------------------------------------
       const game = createLudoRoom(user, normalizedVariant, fee);
+
+      // Re-read queue from map to avoid stale reference after any prior mutations
       const freshQueue = global.__matchmakingQueue.get(queueKey) || [];
       freshQueue.push({ user, game });
       global.__matchmakingQueue.set(queueKey, freshQueue);
       broadcastLudoQueueUpdate(queueKey);
 
       if (global.io) {
-        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+        StatsService.emitStatsUpdate(global.io).catch(err => console.error('[MM] STATS_EMIT_ERROR', err));
       }
 
-      console.log('NEW_MATCHMAKING_ROOM_CREATED', {
+      console.log('[MM] ROOM_CREATED (waiting for opponent)', {
+        ROOM_ID: game.matchId,
         queueKey,
-        matchId: game.matchId,
         userId: userIdStr,
-        variant: normalizedVariant,
-        entryFee: fee
-      });
-      console.log('QUEUE_AFTER_JOIN', {
-        queueKey,
-        queueLength: freshQueue.length,
-        waitingRoomIds: freshQueue.map(item => item.game.matchId)
+        QUEUE_LENGTH: freshQueue.length,
+        WAITING_COUNT: freshQueue.length,
+        ACTIVE_MATCHES: ArenaStatusManager.state[queueKey]?.activeMatchCount ?? 0,
       });
 
+      // Auto-refund if no opponent found within 75 seconds
       const refundTimeout = setTimeout(async () => {
         try {
           if (game.status === 'MATCHMAKING') {
@@ -396,22 +442,24 @@ export class LudoService {
           try {
             await user.save();
           } catch (err) {
-            console.warn('Refund save failed', err);
+            console.warn('[MM] Refund save failed', err);
           }
           try {
             const { addTransaction } = await import('../wallet/transaction.service.js');
             addTransaction({ type: 'REFUND', amount: fee, method: `Matchmaking Refund (${normalizedVariant})` }, user);
           } catch (err) {
-            console.warn('Refund txn failed', err);
+            console.warn('[MM] Refund txn failed', err);
           }
 
-          console.log('MATCHMAKING_REFUND_ISSUED', { user: userIdStr, fee, matchId: game.matchId });
+          console.log('[MM] MATCHMAKING_REFUND_ISSUED', { userId: userIdStr, fee, matchId: game.matchId });
         } catch (err) {
-          console.error('Error in refund timeout', err);
+          console.error('[MM] Error in refund timeout', err);
         }
       }, 75000);
 
       global.__matchmakingRefunds.set(game.matchId, refundTimeout);
+
+      console.log('[MM] LOCK_RELEASED (waiting for opponent)');
 
       return {
         ...game,

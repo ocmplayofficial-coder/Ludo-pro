@@ -137,7 +137,10 @@ export class TeenPattiController {
     try {
       const userId = req.user._id;
       const history = await TeenPattiMatchModel.find({
-        "players.userId": userId
+        $or: [
+          { "players.A.userId": userId },
+          { "players.B.userId": userId }
+        ]
       }).sort({ createdAt: -1 }).lean();
       
       return res.json({ success: true, history });

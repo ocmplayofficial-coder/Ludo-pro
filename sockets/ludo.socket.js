@@ -15,7 +15,7 @@ function getPendingLudoGameForUser(userId) {
     const isRed = userId === redId;
     const isYellow = userId === yellowId;
 
-    if (game.status === 'PLAYING_PENDING' && (isRed || isYellow)) {
+    if ((game.status === 'PLAYING_PENDING' || game.status === 'PLAYING') && (isRed || isYellow)) {
       return game;
     }
 
@@ -73,15 +73,30 @@ export function handleLudoSocket(ludoNamespace) {
   ludoNamespace.on('connection', (socket) => {
     const userId = socket.user?._id?.toString();
     console.log('Ludo Socket.IO client connected:', socket.id, 'User:', userId);
-    if (userId) {
-      global.onlineUsers.set(userId, socket.id);
-      socket.join(userId);
-      if (global.io) {
-        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
-      }
-      console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
-      tryAutoJoinPendingMatch(socket, ludoNamespace);
+    
+    if (!userId) {
+      console.warn('Ludo Socket connection rejected: No authenticated user.');
+      return socket.disconnect(true);
     }
+    
+    // Duplicate Login Protection: Remove stale socket
+    const existingSocketId = global.onlineUsers.get(userId);
+    if (existingSocketId && existingSocketId !== socket.id) {
+      const existingSocket = ludoNamespace.sockets.get(existingSocketId);
+      if (existingSocket) {
+        console.log(`Disconnecting stale socket ${existingSocketId} for user ${userId}`);
+        existingSocket.disconnect(true);
+      }
+    }
+
+    global.onlineUsers.set(userId, socket.id);
+    socket.join(userId);
+    
+    if (global.io) {
+      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
+    }
+    console.log(`Ludo client ${socket.id} joined personal room ${userId}`);
+    tryAutoJoinPendingMatch(socket, ludoNamespace);
 
     // Broadcast current arena statuses to the newly connected client
     ArenaStatusManager.broadcastAll(socket);
@@ -341,7 +356,10 @@ export function handleLudoSocket(ludoNamespace) {
     socket.on('disconnect', () => {
       console.log('Ludo client disconnected:', socket.id);
       if (userId) {
-        global.onlineUsers.delete(userId);
+        // Only delete from onlineUsers if this is still the active socket
+        if (global.onlineUsers.get(userId) === socket.id) {
+            global.onlineUsers.delete(userId);
+        }
         
         // Remove from matchmaking queue if they disconnect
         if (global.__matchmakingQueue) {
@@ -368,6 +386,7 @@ export function handleLudoSocket(ludoNamespace) {
       if (global.io) {
         StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
       }
+      ArenaStatusManager.broadcastOnlineUsersUpdate();
     });
   });
 }

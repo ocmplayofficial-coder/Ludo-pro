@@ -188,6 +188,12 @@ export function handleLudoSocket(ludoNamespace) {
         // Start server authoritative game timer loop
         LudoService.startGameTimer(game.matchId);
 
+        // Clear connection timeout since both players have successfully joined
+        if (global.__matchmakingRefunds && global.__matchmakingRefunds.has(game.matchId)) {
+          clearTimeout(global.__matchmakingRefunds.get(game.matchId));
+          global.__matchmakingRefunds.delete(game.matchId);
+        }
+
         // Prepare concise game start payload per requirement
         const startPayload = {
           currentTurn: game.turn,
@@ -363,23 +369,19 @@ export function handleLudoSocket(ludoNamespace) {
         
         // Remove from matchmaking queue if they disconnect
         if (global.__matchmakingQueue) {
-          for (const [queueKey, queue] of global.__matchmakingQueue.entries()) {
-            const idx = queue.findIndex(item => item.user._id.toString() === userId);
-            if (idx !== -1) {
-              const item = queue[idx];
-              queue.splice(idx, 1);
-              if (queue.length === 0) {
-                global.__matchmakingQueue.delete(queueKey);
-              } else {
-                global.__matchmakingQueue.set(queueKey, queue);
-              }
-              // Update queue state
-              if (global.ludoNamespace) {
-                ArenaStatusManager.syncState(queueKey, global.__matchmakingQueue.get(queueKey));
-              }
-              console.log('REMOVED_FROM_QUEUE_ON_DISCONNECT', { userId, queueKey });
+          let wasInQueue = false;
+          for (const queue of global.__matchmakingQueue.values()) {
+            if (queue.find(item => item.user._id.toString() === userId)) {
+              wasInQueue = true; 
               break;
             }
+          }
+          if (wasInQueue) {
+            UserModel.findById(userId).then(userDoc => {
+              if (userDoc) {
+                LudoService.cancelMatchmaking(userDoc).catch(err => console.error('Disconnect cancelMatchmaking error:', err));
+              }
+            }).catch(err => console.error('Disconnect findById error:', err));
           }
         }
       }

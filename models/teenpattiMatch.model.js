@@ -11,15 +11,26 @@ const teenPattiMatchSchema = new mongoose.Schema({
   variant: { type: String, required: true },
   entryFee: { type: Number, required: true },
   pot: { type: Number, required: true },
-  players: [{
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    username: { type: String, required: true },
-    avatar: { type: String, default: 'P' },
-    winnings: { type: Number, default: 0 },
-    cards: [cardSchema],
-    folded: { type: Boolean, default: false },
-    seen: { type: Boolean, default: false }
-  }],
+  players: {
+    A: {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      username: { type: String, required: true },
+      avatar: { type: String, default: 'P' },
+      winnings: { type: Number, default: 0 },
+      cards: [cardSchema],
+      folded: { type: Boolean, default: false },
+      seen: { type: Boolean, default: false }
+    },
+    B: {
+      userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+      username: { type: String },
+      avatar: { type: String, default: 'P' },
+      winnings: { type: Number, default: 0 },
+      cards: [cardSchema],
+      folded: { type: Boolean, default: false },
+      seen: { type: Boolean, default: false }
+    }
+  },
   winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   winnerName: { type: String },
   status: { type: String, default: 'FINISHED' }

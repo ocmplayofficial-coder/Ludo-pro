@@ -5,36 +5,30 @@ import { UserModel } from '../models/user.model.js';
 import { TeenPattiMatchModel } from '../models/teenpattiMatch.model.js';
 import { buildDeck } from '../game-engine/teenpatti/deckManager.js';
 import { shuffleDeck } from '../game-engine/teenpatti/cardShuffler.js';
-import { StatsService } from './stats.service.js';
 
-// Timer storage for game intervals
-if (!global.__tpGameIntervals) {
-  global.__tpGameIntervals = new Map();
-}
+if (!global.__tpGameIntervals) global.__tpGameIntervals = new Map();
+if (!global.__tpQueue) global.__tpQueue = new Map(); // Maps queueKey to an array of matchIds
+if (!global.__tpRefunds) global.__tpRefunds = new Map(); // Matchmaking expiry timeouts
+
+const PLATFORM_COMMISSION = 0.05; // 5%
 
 function broadcastTPQueueUpdate(queueKey) {
   if (global.teenpattiNamespace) {
-    const q = global.__tpQueue?.get(queueKey);
-    let count = q ? q.length : 0;
-    
-    // Add active players in this arena
+    let count = 0;
     const [feeStr, variantStr] = queueKey.split(':');
     const fee = Number(feeStr);
     for (const game of db.teenPattiGames.values()) {
-      if (game.entryFee === fee && game.variant === variantStr && game.status !== 'MATCHMAKING') {
-        if (game.players) {
-          if (game.players.A) count++;
-          if (game.players.B) count++;
-        }
+      if (game.entryFee === fee && game.variant === variantStr) {
+        if (game.players.A) count++;
+        if (game.players.B) count++;
       }
     }
-
     global.teenpattiNamespace.emit('QUEUE_UPDATE', { queueKey, count, gameType: 'teenpatti' });
   }
 }
+
 function broadcastTPGameUpdate(game) {
   if (global.teenpattiNamespace) {
-    console.log("SOCKET_BROADCAST_TP_GAME_UPDATE", game.matchId);
     global.teenpattiNamespace.to(game.matchId).emit('GAME_UPDATE', game);
   }
 }
@@ -45,7 +39,6 @@ export class TeenPattiService {
     if (global.__tpGameIntervals.has(matchId)) {
       clearInterval(global.__tpGameIntervals.get(matchId));
     }
-
     const intervalId = setInterval(async () => {
       try {
         const game = db.teenPattiGames.get(matchId);
@@ -55,10 +48,18 @@ export class TeenPattiService {
           return;
         }
 
+        // If a side show is pending, we don't tick the turn timer for the main turn, we tick the side show timer?
+        // Actually, we can tick the turn timer. If it times out, the active player folds.
         game.turnTimerRemaining = (game.turnTimerRemaining || 15) - 1;
         if (game.turnTimerRemaining <= 0) {
           console.log(`[TP-Timer] Timeout turn occurred for game ${matchId}`);
-          await TeenPattiService.handleTimeoutFold(matchId, game.turn);
+          
+          if (game.sideShow) {
+            // Target player timed out rejecting/accepting
+            await TeenPattiService.handleSideShowTimeout(game);
+          } else {
+            await TeenPattiService.handleTimeoutFold(matchId, game.turn);
+          }
         } else {
           broadcastTPGameUpdate(game);
         }
@@ -66,26 +67,24 @@ export class TeenPattiService {
         console.error(`Error in TP game timer loop:`, err);
       }
     }, 1000);
-
     global.__tpGameIntervals.set(matchId, intervalId);
   }
 
   static async matchmaking(user, variant, entryFee) {
-    if (!global.__tpQueue) {
-      global.__tpQueue = new Map();
-    }
-    if (!global.__tpRefunds) {
-      global.__tpRefunds = new Map();
-    }
     const queueKey = `${entryFee}:${variant}`;
     const userIdStr = user._id.toString();
-
-    console.log("TP_MATCHMAKING_REQUEST", user.username, variant, entryFee);
-
     const fee = parseFloat(entryFee);
+
     if (user.walletBalance < fee) throw new Error('Insufficient wallet balance.');
 
-    // Deduct entry fee
+    for (const game of db.teenPattiGames.values()) {
+      if (game.status === 'MATCHMAKING') {
+        if (game.players.A?.userId === userIdStr || game.players.B?.userId === userIdStr) {
+          return game;
+        }
+      }
+    }
+
     if (user.depositBalance >= fee) {
       user.depositBalance -= fee;
     } else {
@@ -96,7 +95,6 @@ export class TeenPattiService {
     user.walletBalance = Math.max(0, user.walletBalance - fee);
     await user.save();
 
-    // Record transaction
     try {
       addTransaction({
         type: 'ENTRY_FEE',
@@ -104,190 +102,125 @@ export class TeenPattiService {
         status: 'SUCCESS',
         method: `TeenPatti Matchmaking (${variant})`
       }, user);
-    } catch (err) {
-      console.warn('Failed to record TP matchmaking transaction', err);
-    }
+    } catch (err) {}
 
-    // 1. Check if user already in the same queue
-    const sameQueue = global.__tpQueue.get(queueKey) || [];
-    const existingIndex = sameQueue.findIndex(item => item.user._id.toString() === userIdStr);
-    if (existingIndex !== -1) {
-      return { ...sameQueue[existingIndex].game, status: 'MATCHMAKING' };
-    }
+    const playerObj = {
+      userId: userIdStr,
+      username: user.username,
+      avatar: user.avatar,
+      walletBalance: user.walletBalance,
+      cards: [],
+      seen: false,
+      folded: false,
+      lastBet: fee
+    };
 
-    // 2. Queue cleanup from other queues
-    for (const [k, q] of global.__tpQueue.entries()) {
-      if (k !== queueKey) {
-        const idx = q.findIndex(item => item.user._id.toString() === userIdStr);
-        if (idx !== -1) {
-          q.splice(idx, 1);
-        if (q.length === 0) {
-          global.__tpQueue.delete(k);
-        } else {
-          global.__tpQueue.set(k, q);
-        }
-        broadcastTPQueueUpdate(k);
-        }
+    const activeMatchIds = global.__tpQueue.get(queueKey) || [];
+    let joinedGame = null;
+
+    for (const matchId of activeMatchIds) {
+      const game = db.teenPattiGames.get(matchId);
+      if (game && game.status === 'MATCHMAKING' && !game.players.B) {
+        game.players.B = playerObj;
+        game.pot += fee;
+        joinedGame = game;
+        break;
       }
     }
 
-    // 3. Find a waiting opponent in this queue
-    const queue = global.__tpQueue.get(queueKey) || [];
-    let waitingIndex = queue.findIndex(item => item.user._id.toString() !== userIdStr);
-
-    if (waitingIndex !== -1) {
-      const waiting = queue[waitingIndex];
-      queue.splice(waitingIndex, 1);
-      if (queue.length === 0) {
-        global.__tpQueue.delete(queueKey);
-      } else {
-        global.__tpQueue.set(queueKey, queue);
-      }
+    if (joinedGame) {
       broadcastTPQueueUpdate(queueKey);
-
-      // Clear refund timer for matched opponent
-      const timerKey = waiting.game.matchId;
-      const tId = global.__tpRefunds.get(timerKey);
-      if (tId) {
-        clearTimeout(tId);
-        global.__tpRefunds.delete(timerKey);
-      }
-
-      // Match found! Initialize table with 2 seats
-      const matchId = waiting.game.matchId;
-      const deck = shuffleDeck(buildDeck());
-
-      let jokerValue = null;
-      if (variant === 'JOKER') {
-        const randomCard = deck[Math.floor(Math.random() * deck.length)];
-        jokerValue = randomCard.value;
-      }
-
-      const handA = [deck.pop(), deck.pop(), deck.pop()];
-      const handB = [deck.pop(), deck.pop(), deck.pop()];
-
-      const game = {
-        matchId,
-        variant,
-        entryFee: fee,
-        jokerValue,
-        pot: fee * 2,
-        currentBet: fee,
-        players: {
-          A: {
-            userId: waiting.user._id.toString(),
-            username: waiting.user.username,
-            avatar: waiting.user.avatar,
-            walletBalance: waiting.user.walletBalance,
-            cards: handA,
-            seen: false,
-            folded: false,
-            lastBet: fee
-          },
-          B: {
-            userId: user._id.toString(),
-            username: user.username,
-            avatar: user.avatar,
-            walletBalance: user.walletBalance,
-            cards: handB,
-            seen: false,
-            folded: false,
-            lastBet: fee
-          }
-        },
-        turn: waiting.user._id.toString(),
-        turnTimerRemaining: 15,
-        winner: null,
-        status: 'PLAYING_PENDING',
-        waitingForPlayers: true,
-        logs: [
-          `Table matched!`,
-          `Ante values of ₹${fee} placed by both players.`,
-          `Cards dealt. First turn goes to ${waiting.user.username}.`
-        ]
-      };
-
-      db.teenPattiGames.set(matchId, game);
-
-      if (global.teenpattiNamespace) {
-        global.teenpattiNamespace.to(matchId).emit('GAME_UPDATE', game);
-      }
-      if (global.io) {
-        StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
-      }
-
-      return game;
+      // DON'T start game here — socket handler must call startGame AFTER player B joins the room
+      joinedGame._readyToStart = true;
+      return joinedGame;
     }
 
-    // 4. Create new matchmaking room
     const matchId = "TP-" + Math.floor(100000 + Math.random() * 900000);
-    const game = {
+    const newGame = {
       matchId,
       variant,
       entryFee: fee,
       pot: fee,
-      players: {
-        A: {
-          userId: user._id.toString(),
-          username: user.username,
-          avatar: user.avatar,
-          walletBalance: user.walletBalance,
-          cards: [],
-          seen: false,
-          folded: false,
-          lastBet: fee
-        }
-      },
-      status: 'MATCHMAKING'
+      currentBet: fee,
+      players: { A: playerObj },
+      turn: null,
+      turnTimerRemaining: 15,
+      winner: null, // "A" or "B" or null
+      status: 'MATCHMAKING',
+      sideShow: null, // { requester: 'A', target: 'B', status: 'PENDING' }
+      logs: []
     };
 
-    const freshQueue = global.__tpQueue.get(queueKey) || [];
-    freshQueue.push({ user, game });
-    global.__tpQueue.set(queueKey, freshQueue);
+    db.teenPattiGames.set(matchId, newGame);
+    activeMatchIds.push(matchId);
+    global.__tpQueue.set(queueKey, activeMatchIds);
     broadcastTPQueueUpdate(queueKey);
 
-    if (global.io) {
-      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
-    }
-
-    // Refund timeout
     const refundTimeout = setTimeout(async () => {
       try {
-        const q = global.__tpQueue.get(queueKey) || [];
-        const idx = q.findIndex(item => item.user._id.toString() === userIdStr && item.game.matchId === matchId);
-        if (idx !== -1) {
-          q.splice(idx, 1);
-          if (q.length === 0) {
-            global.__tpQueue.delete(queueKey);
-          } else {
-            global.__tpQueue.set(queueKey, q);
-          }
-          broadcastTPQueueUpdate(queueKey);
-
-          // Refund user
-          const u = await UserModel.findById(userIdStr);
-          if (u) {
-            u.walletBalance = (u.walletBalance || 0) + fee;
-            u.depositBalance = (u.depositBalance || 0) + fee;
-            await u.save();
-            addTransaction({
-              type: 'REFUND',
-              amount: fee,
-              status: 'SUCCESS',
-              method: `TeenPatti Draw Refund`
-            }, u);
+        const g = db.teenPattiGames.get(matchId);
+        if (g && g.status === 'MATCHMAKING') {
+          for (const seat of ['A', 'B']) {
+            if (g.players[seat]) {
+              const u = await UserModel.findById(g.players[seat].userId);
+              if (u) {
+                u.walletBalance = (u.walletBalance || 0) + fee;
+                u.depositBalance = (u.depositBalance || 0) + fee;
+                await u.save();
+                addTransaction({ type: 'REFUND', amount: fee, status: 'SUCCESS', method: `TeenPatti Draw Refund` }, u);
+              }
+            }
           }
           db.teenPattiGames.delete(matchId);
-          console.log('TP_MATCHMAKING_REFUND_ISSUED', { userIdStr, matchId });
+          const q = global.__tpQueue.get(queueKey) || [];
+          global.__tpQueue.set(queueKey, q.filter(id => id !== matchId));
+          broadcastTPQueueUpdate(queueKey);
         }
-      } catch (err) {
-        console.error('Error in TP refund timeout:', err);
-      }
+      } catch (err) {}
     }, 75000);
-
     global.__tpRefunds.set(matchId, refundTimeout);
 
-    return game;
+    return newGame;
+  }
+
+  static startGame(matchId) {
+    const game = db.teenPattiGames.get(matchId);
+    if (!game || game.status !== 'MATCHMAKING' || !game.players.A || !game.players.B) return;
+
+    if (global.__tpRefunds.has(matchId)) {
+      clearTimeout(global.__tpRefunds.get(matchId));
+      global.__tpRefunds.delete(matchId);
+    }
+
+    const queueKey = `${game.entryFee}:${game.variant}`;
+    const q = global.__tpQueue.get(queueKey) || [];
+    global.__tpQueue.set(queueKey, q.filter(id => id !== matchId));
+
+    const deck = shuffleDeck(buildDeck());
+    let jokerValue = null;
+    if (game.variant === 'JOKER') {
+      const randomCard = deck[Math.floor(Math.random() * deck.length)];
+      jokerValue = randomCard.value;
+    }
+    game.jokerValue = jokerValue;
+
+    game.players.A.cards = [deck.pop(), deck.pop(), deck.pop()];
+    game.players.B.cards = [deck.pop(), deck.pop(), deck.pop()];
+
+    game.turn = game.players.A.userId;
+    game.status = 'PLAYING';
+    game.turnTimerRemaining = 15;
+    game.logs.push(`Game started! A vs B`);
+
+    broadcastTPQueueUpdate(queueKey);
+    broadcastTPGameUpdate(game);
+    TeenPattiService.startTPGameTimer(matchId);
+
+    if (global.teenpattiNamespace) {
+      global.teenpattiNamespace.to(matchId).emit('MATCH_FOUND', { roomId: matchId, players: game.players });
+      global.teenpattiNamespace.to(matchId).emit('GAME_START', { roomId: matchId, turn: game.turn });
+      global.teenpattiNamespace.to(matchId).emit('CARD_DEALT', { matchId });
+    }
   }
 
   static getGame(id) {
@@ -297,120 +230,107 @@ export class TeenPattiService {
   }
 
   static async cancelMatchmaking(user) {
-    if (!global.__tpQueue) return { success: false, message: "No active queue." };
     const userIdStr = user._id.toString();
+    for (const [matchId, game] of db.teenPattiGames.entries()) {
+      if (game.status === 'MATCHMAKING') {
+        const isA = game.players.A?.userId === userIdStr;
+        const isB = game.players.B?.userId === userIdStr;
+        
+        if (isA || isB) {
+          const seat = isA ? 'A' : 'B';
+          delete game.players[seat];
+          game.pot -= game.entryFee;
+          
+          user.walletBalance = (user.walletBalance || 0) + game.entryFee;
+          user.depositBalance = (user.depositBalance || 0) + game.entryFee;
+          await user.save();
+          addTransaction({ type: 'REFUND', amount: game.entryFee, status: 'SUCCESS', method: `TeenPatti Match Cancelled` }, user);
 
-    for (const [queueKey, queue] of global.__tpQueue.entries()) {
-      const idx = queue.findIndex(item => item.user._id.toString() === userIdStr);
-      if (idx !== -1) {
-        const item = queue[idx];
-        const fee = item.game.entryFee;
-        const matchId = item.game.matchId;
-
-        queue.splice(idx, 1);
-        if (queue.length === 0) {
-          global.__tpQueue.delete(queueKey);
-        } else {
-          global.__tpQueue.set(queueKey, queue);
+          if (!game.players.A && !game.players.B) {
+            db.teenPattiGames.delete(matchId);
+            if (global.__tpRefunds.has(matchId)) {
+              clearTimeout(global.__tpRefunds.get(matchId));
+              global.__tpRefunds.delete(matchId);
+            }
+          }
+          
+          const queueKey = `${game.entryFee}:${game.variant}`;
+          broadcastTPQueueUpdate(queueKey);
+          return { success: true, refunded: game.entryFee };
         }
-        broadcastTPQueueUpdate(queueKey);
-
-        const refundTimer = global.__tpRefunds.get(matchId);
-        if (refundTimer) {
-          clearTimeout(refundTimer);
-          global.__tpRefunds.delete(matchId);
-        }
-
-        db.teenPattiGames.delete(matchId);
-
-        user.walletBalance = (user.walletBalance || 0) + fee;
-        user.depositBalance = (user.depositBalance || 0) + fee;
-        await user.save();
-
-        addTransaction({
-          type: 'REFUND',
-          amount: fee,
-          status: 'SUCCESS',
-          method: `TeenPatti Match Cancelled`
-        }, user);
-
-        return { success: true, refunded: fee };
       }
     }
-    return { success: false, message: "User not in matchmaking queue." };
+    return { success: false, message: "Not in matchmaking." };
   }
 
   static async handleTimeoutFold(matchId, currentTurnUserId) {
     const game = db.teenPattiGames.get(matchId);
     if (!game || game.status !== 'PLAYING') return;
-
     game.logs.unshift(`⏰ Timeout! Player turn expired.`);
     await TeenPattiService.concludeFold(game, currentTurnUserId);
   }
 
+  static async handleSideShowTimeout(game) {
+    game.logs.unshift(`⏰ Side Show request expired.`);
+    // The target player took too long to accept/reject. Auto-reject.
+    game.sideShow = null;
+    game.turnTimerRemaining = 15;
+    broadcastTPGameUpdate(game);
+  }
+
   static async fold(id, user) {
     const game = db.teenPattiGames.get(id);
-    if (!game) throw new Error("Game not found.");
-    if (game.status !== 'PLAYING') throw new Error("Game has already concluded.");
-
-    const userIdStr = user._id.toString();
-    if (game.turn !== userIdStr) throw new Error("It is not your turn.");
-
-    await TeenPattiService.concludeFold(game, userIdStr);
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
+    if (game.turn !== user._id.toString()) throw new Error("It is not your turn.");
+    if (game.sideShow) throw new Error("Cannot fold during Side Show request.");
+    await TeenPattiService.concludeFold(game, user._id.toString());
     return game;
   }
 
   static async concludeFold(game, foldingUserId) {
-    const isPlayerAFolding = game.players.A.userId === foldingUserId;
-    const folder = isPlayerAFolding ? game.players.A : game.players.B;
-    const winner = isPlayerAFolding ? game.players.B : game.players.A;
+    if (game.status === 'FINISHED') return;
+    const isA = game.players.A.userId === foldingUserId;
+    const folder = isA ? game.players.A : game.players.B;
+    const winnerSeat = isA ? 'B' : 'A';
+    
+    if (folder) folder.folded = true;
+    game.logs.unshift(`🏳️ ${folder?.username || 'Player'} Folded!`);
 
-    folder.folded = true;
-    game.logs.unshift(`🏳️ ${folder.username} Folded!`);
-
-    await TeenPattiService.awardWinner(game, winner);
+    await TeenPattiService.awardWinner(game, winnerSeat, true);
   }
 
   static seen(id, user) {
     const game = db.teenPattiGames.get(id);
-    if (!game) throw new Error("Game not found.");
-    if (game.status !== 'PLAYING') throw new Error("Game is not active.");
-
-    const isPlayerA = game.players.A.userId === user._id.toString();
-    const player = isPlayerA ? game.players.A : game.players.B;
-
-    if (player.seen) return game;
-
-    player.seen = true;
-    game.logs.unshift(`👀 ${player.username} has seen their cards!`);
-    broadcastTPGameUpdate(game);
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
+    
+    const isA = game.players.A.userId === user._id.toString();
+    const player = isA ? game.players.A : game.players.B;
+    
+    if (player && !player.seen) {
+      player.seen = true;
+      game.logs.unshift(`👀 ${player.username} has seen their cards!`);
+      broadcastTPGameUpdate(game);
+    }
     return game;
   }
 
   static async chaal(id, user) {
     const game = db.teenPattiGames.get(id);
-    if (!game) throw new Error("Game not found.");
-    if (game.status !== 'PLAYING') throw new Error("Game is not active.");
-
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
     const userIdStr = user._id.toString();
     if (game.turn !== userIdStr) throw new Error("It is not your turn.");
+    if (game.sideShow) throw new Error("Cannot play Chaal while Side Show is pending.");
 
-    const isPlayerA = game.players.A.userId === userIdStr;
-    const player = isPlayerA ? game.players.A : game.players.B;
-    const opponent = isPlayerA ? game.players.B : game.players.A;
-
-    // Bet size matches: seen player plays double
+    const isA = game.players.A.userId === userIdStr;
+    const player = isA ? game.players.A : game.players.B;
+    const opponent = isA ? game.players.B : game.players.A;
     const betSize = player.seen ? game.currentBet * 2 : game.currentBet;
 
     const u = await UserModel.findById(userIdStr);
-    if (u.walletBalance < betSize) {
-      throw new Error("Insufficient wallet balance for this Chaal.");
-    }
+    if (u.walletBalance < betSize) throw new Error("Insufficient balance.");
 
-    // Deduct
-    if (u.depositBalance >= betSize) {
-      u.depositBalance -= betSize;
-    } else {
+    if (u.depositBalance >= betSize) u.depositBalance -= betSize;
+    else {
       const rest = betSize - u.depositBalance;
       u.depositBalance = 0;
       u.winningsBalance = Math.max(0, u.winningsBalance - rest);
@@ -423,37 +343,109 @@ export class TeenPattiService {
     game.pot += betSize;
     game.logs.unshift(`🎲 ${player.username} played Chaal: ₹${betSize}`);
 
-    // Switch turn
     game.turn = opponent.userId;
     game.turnTimerRemaining = 15;
-
     broadcastTPGameUpdate(game);
+    return game;
+  }
+  
+  static async requestSideShow(id, user) {
+    const game = db.teenPattiGames.get(id);
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
+    const userIdStr = user._id.toString();
+    if (game.turn !== userIdStr) throw new Error("It is not your turn.");
+    if (game.sideShow) throw new Error("Side show already pending.");
+    
+    // Both players must be SEEN to allow side show
+    if (!game.players.A.seen || !game.players.B.seen) {
+        throw new Error("Both players must be SEEN for a Side Show.");
+    }
+    
+    const isA = game.players.A.userId === userIdStr;
+    const requester = isA ? 'A' : 'B';
+    const target = isA ? 'B' : 'A';
+    const player = game.players[requester];
+    
+    // Side show costs the same as chaal
+    const betSize = game.currentBet * 2;
+    
+    const u = await UserModel.findById(userIdStr);
+    if (u.walletBalance < betSize) throw new Error("Insufficient balance for Side Show.");
+
+    if (u.depositBalance >= betSize) u.depositBalance -= betSize;
+    else {
+      const rest = betSize - u.depositBalance;
+      u.depositBalance = 0;
+      u.winningsBalance = Math.max(0, u.winningsBalance - rest);
+    }
+    u.walletBalance = Math.max(0, u.walletBalance - betSize);
+    await u.save();
+
+    player.walletBalance = u.walletBalance;
+    player.lastBet = betSize;
+    game.pot += betSize;
+    
+    game.sideShow = { requester, target, status: 'PENDING' };
+    game.logs.unshift(`⚔️ ${player.username} requested a Side Show!`);
+    game.turnTimerRemaining = 15; // Give target time to respond
+    
+    broadcastTPGameUpdate(game);
+    return game;
+  }
+  
+  static async respondSideShow(id, user, accept) {
+    const game = db.teenPattiGames.get(id);
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
+    if (!game.sideShow) throw new Error("No pending side show.");
+    
+    const userIdStr = user._id.toString();
+    const isA = game.players.A.userId === userIdStr;
+    const responderSeat = isA ? 'A' : 'B';
+    
+    if (game.sideShow.target !== responderSeat) {
+        throw new Error("You are not the target of the Side Show.");
+    }
+    
+    if (!accept) {
+        game.logs.unshift(`🛑 ${game.players[responderSeat].username} rejected the Side Show.`);
+        game.sideShow = null;
+        // Turn stays with the next person (the target, since requester already played their turn by requesting)
+        game.turn = game.players[responderSeat].userId;
+        game.turnTimerRemaining = 15;
+        broadcastTPGameUpdate(game);
+        return game;
+    }
+    
+    game.logs.unshift(`✅ ${game.players[responderSeat].username} accepted the Side Show!`);
+    // Compare cards. The weaker hand is folded.
+    const winRef = compareHands(game.players.A.cards, game.players.B.cards, game.variant, game.jokerValue);
+    const loserSeat = winRef === 'A' ? 'B' : 'A';
+    
+    // In Side Show, if they tie (winRef typically favors A if exact tie, but usually requester loses ties)
+    // For simplicity, we just use the winRef output.
+    
+    game.logs.unshift(`☠️ ${game.players[loserSeat].username} lost the Side Show.`);
+    await TeenPattiService.concludeFold(game, game.players[loserSeat].userId);
     return game;
   }
 
   static async show(id, user) {
     const game = db.teenPattiGames.get(id);
-    if (!game) throw new Error("Game not found.");
-    if (game.status !== 'PLAYING') throw new Error("Game is not active.");
-
+    if (!game || game.status !== 'PLAYING') throw new Error("Game is not active.");
+    
     const userIdStr = user._id.toString();
     if (game.turn !== userIdStr) throw new Error("It is not your turn.");
+    if (game.sideShow) throw new Error("Cannot show while Side Show is pending.");
 
-    const isPlayerA = game.players.A.userId === userIdStr;
-    const player = isPlayerA ? game.players.A : game.players.B;
-    const opponent = isPlayerA ? game.players.B : game.players.A;
-
+    const isA = game.players.A.userId === userIdStr;
+    const player = isA ? game.players.A : game.players.B;
     const betSize = player.seen ? game.currentBet * 2 : game.currentBet;
 
     const u = await UserModel.findById(userIdStr);
-    if (u.walletBalance < betSize) {
-      throw new Error("Insufficient wallet balance for Show.");
-    }
+    if (u.walletBalance < betSize) throw new Error("Insufficient balance.");
 
-    // Deduct
-    if (u.depositBalance >= betSize) {
-      u.depositBalance -= betSize;
-    } else {
+    if (u.depositBalance >= betSize) u.depositBalance -= betSize;
+    else {
       const rest = betSize - u.depositBalance;
       u.depositBalance = 0;
       u.winningsBalance = Math.max(0, u.winningsBalance - rest);
@@ -466,121 +458,93 @@ export class TeenPattiService {
     game.pot += betSize;
     game.logs.unshift(`🏁 ${player.username} called SHOWDOWN!`);
 
-    // Compare hands
     const winRef = compareHands(game.players.A.cards, game.players.B.cards, game.variant, game.jokerValue);
-    const winner = winRef === 'A' ? game.players.A : game.players.B;
-
-    await TeenPattiService.awardWinner(game, winner);
+    
+    await TeenPattiService.awardWinner(game, winRef, false);
     return game;
   }
 
-  static async awardWinner(game, winnerSeat) {
-    game.winner = winnerSeat.userId === game.players.A.userId ? 'A' : 'B';
+  static async awardWinner(game, winnerSeat, byFold = false) {
+    game.winner = winnerSeat; // "A" or "B"
     game.status = 'FINISHED';
 
-    // Clear timer
     if (global.__tpGameIntervals.has(game.matchId)) {
       clearInterval(global.__tpGameIntervals.get(game.matchId));
       global.__tpGameIntervals.delete(game.matchId);
     }
-
     db.teenPattiGames.delete(game.matchId);
-    const queueKey = `${game.entryFee}:${game.variant}`;
-    broadcastTPQueueUpdate(queueKey);
+    broadcastTPQueueUpdate(`${game.entryFee}:${game.variant}`);
+    
+    const winnerData = game.players[winnerSeat];
+    const loserSeat = winnerSeat === 'A' ? 'B' : 'A';
+    const loserData = game.players[loserSeat];
 
-    if (global.io) {
-      StatsService.emitStatsUpdate(global.io).catch(err => console.error('STATS_EMIT_ERROR', err));
-    }
+    // Apply platform commission
+    const commission = game.pot * PLATFORM_COMMISSION;
+    const finalWinnings = game.pot - commission;
 
     try {
-      const winnerUser = await UserModel.findById(winnerSeat.userId);
-      const loserSeat = winnerSeat.userId === game.players.A.userId ? game.players.B : game.players.A;
-      const loserUser = await UserModel.findById(loserSeat.userId);
-
-      // Pot award
+      const winnerUser = await UserModel.findById(winnerData.userId);
       if (winnerUser) {
-        winnerUser.walletBalance = (winnerUser.walletBalance || 0) + game.pot;
-        winnerUser.winningsBalance = (winnerUser.winningsBalance || 0) + game.pot;
+        winnerUser.walletBalance = (winnerUser.walletBalance || 0) + finalWinnings;
+        winnerUser.winningsBalance = (winnerUser.winningsBalance || 0) + finalWinnings;
         winnerUser.wins += 1;
         winnerUser.gamesPlayed += 1;
-        winnerUser.earnings += game.pot;
+        winnerUser.earnings += finalWinnings;
         await winnerUser.save();
-
-        addTransaction({
-          type: "WINNINGS",
-          amount: game.pot,
-          status: "SUCCESS",
-          method: `TeenPatti Win (${game.variant})`
-        }, winnerUser);
+        addTransaction({ type: "WINNINGS", amount: finalWinnings, status: "SUCCESS", method: `TeenPatti Win` }, winnerUser);
       }
 
-      if (loserUser) {
-        loserUser.gamesPlayed += 1;
-        await loserUser.save();
+      const loser = await UserModel.findById(loserData.userId);
+      if (loser) {
+        loser.gamesPlayed += 1;
+        await loser.save();
       }
 
-      // Save match to database Match History
-      const matchHistory = await TeenPattiMatchModel.create({
+      await TeenPattiMatchModel.create({
         matchId: game.matchId,
         variant: game.variant,
         entryFee: game.entryFee,
         pot: game.pot,
-        players: [
-          {
-            userId: game.players.A.userId,
-            username: game.players.A.username,
-            avatar: game.players.A.avatar,
-            cards: game.players.A.cards,
-            folded: game.players.A.folded,
-            seen: game.players.A.seen,
-            winnings: winnerSeat.userId === game.players.A.userId ? game.pot : 0
-          },
-          {
-            userId: game.players.B.userId,
-            username: game.players.B.username,
-            avatar: game.players.B.avatar,
-            cards: game.players.B.cards,
-            folded: game.players.B.folded,
-            seen: game.players.B.seen,
-            winnings: winnerSeat.userId === game.players.B.userId ? game.pot : 0
-          }
-        ],
-        winnerId: winnerSeat.userId,
-        winnerName: winnerSeat.username
+        players: {
+          A: { userId: game.players.A.userId, username: game.players.A.username, avatar: game.players.A.avatar, cards: game.players.A.cards, folded: game.players.A.folded, seen: game.players.A.seen, winnings: winnerSeat === 'A' ? finalWinnings : 0 },
+          B: { userId: game.players.B.userId, username: game.players.B.username, avatar: game.players.B.avatar, cards: game.players.B.cards, folded: game.players.B.folded, seen: game.players.B.seen, winnings: winnerSeat === 'B' ? finalWinnings : 0 }
+        },
+        winnerId: winnerData.userId,
+        winnerName: winnerData.username
       });
 
-      console.log("MATCH_HISTORY_SAVED", matchHistory.matchId);
-
-      game.logs.unshift(`👑 Winner declared: ${winnerSeat.username} claimed the pot of ₹${game.pot}!`);
-
+      game.logs.unshift(`👑 Winner declared: ${winnerData.username} claimed ₹${finalWinnings}!`);
+      
+      // Emit strictly once
       if (global.teenpattiNamespace) {
-        global.teenpattiNamespace.to(game.matchId).emit('WINNER_DECLARED', {
-          winner: game.winner,
-          winnerName: winnerSeat.username,
+        global.teenpattiNamespace.to(game.matchId).emit('GAME_RESULT', {
+          winnerSeat,
+          winnerId: winnerData.userId,
+          loserId: loserData.userId,
           pot: game.pot,
-          players: game.players,
-          matchId: game.matchId
+          commission,
+          finalWinnings,
+          winnerCards: winnerData.cards,
+          loserCards: loserData.cards,
+          byFold
         });
       }
     } catch (err) {
-      console.error("Error declaring/awarding Teen Patti winner:", err);
+      console.error("Error saving winner:", err);
     }
-
+    
     broadcastTPGameUpdate(game);
   }
 
   static async leave(id, user) {
     const game = db.teenPattiGames.get(id);
-    if (!game) throw new Error("Game not found.");
-    if (game.status === 'FINISHED') return game;
-
-    const userIdStr = user._id.toString();
-    const isPlayerA = game.players.A.userId === userIdStr;
-    const opponent = isPlayerA ? game.players.B : game.players.A;
-
-    game.logs.unshift(`🚪 Player left the table.`);
-    await TeenPattiService.awardWinner(game, opponent);
-
+    if (!game || game.status === 'FINISHED') return game;
+    if (game.status === 'MATCHMAKING') {
+      await TeenPattiService.cancelMatchmaking(user);
+      return game;
+    }
+    await TeenPattiService.concludeFold(game, user._id.toString());
     return game;
   }
 }

@@ -12,6 +12,7 @@ import { SAFE_CELLS } from '../game-engine/ludo/safeZoneEngine.js';
 import { UserModel } from '../models/user.model.js';
 import { db } from '../config/db.js';
 import { StatsService } from './stats.service.js';
+import { ArenaStatusManager } from '../game-engine/ludo/ArenaStatusManager.js';
 
 function normalizeMatchmakingQueueKey(entryFee, variant) {
   const fee = Number(entryFee);
@@ -23,21 +24,7 @@ function normalizeMatchmakingQueueKey(entryFee, variant) {
 function broadcastLudoQueueUpdate(queueKey) {
   if (global.ludoNamespace) {
     const q = global.__matchmakingQueue?.get(queueKey);
-    let count = q ? q.length : 0;
-    
-    // Add active players in this arena
-    const [feeStr, variantStr] = queueKey.split(':');
-    const fee = Number(feeStr);
-    for (const game of db.ludoGames.values()) {
-      if (game.entryFee === fee && game.variant === variantStr && game.status !== 'MATCHMAKING') {
-        if (game.players) {
-          if (game.players.red) count++;
-          if (game.players.yellow) count++;
-        }
-      }
-    }
-
-    global.ludoNamespace.emit('QUEUE_UPDATE', { queueKey, count, gameType: 'ludo' });
+    ArenaStatusManager.syncState(queueKey, q);
   }
 }
 
@@ -310,6 +297,10 @@ export class LudoService {
 
       const waitingIndex = queue.findIndex(item => item.user._id.toString() !== userIdStr);
       if (waitingIndex !== -1) {
+        if (global.ludoNamespace) {
+          global.ludoNamespace.emit('queueUpdated', { queueKey, players: 2, status: 'starting' });
+        }
+
         const waiting = queue[waitingIndex];
         queue.splice(waitingIndex, 1);
         if (queue.length === 0) {
@@ -317,7 +308,11 @@ export class LudoService {
         } else {
           global.__matchmakingQueue.set(queueKey, queue);
         }
-        broadcastLudoQueueUpdate(queueKey);
+        
+        // Let the 'starting' status linger for 2.5s before broadcasting true queue state
+        setTimeout(() => {
+          broadcastLudoQueueUpdate(queueKey);
+        }, 2500);
 
         const game = waiting.game;
         game.players.yellow = { userId: user._id, username: user.username, avatar: user.avatar };

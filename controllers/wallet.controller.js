@@ -29,9 +29,12 @@ export class WalletController {
   }
 
   static withdraw(req, res) {
-    const { amount, method } = req.body;
+    const { amount, method, details } = req.body;
     try {
-      const tx = WalletService.withdraw(req.user, amount, method);
+      const methodStr = method === 'UPI' 
+        ? `UPI (${details?.accountName || ''} | ${details?.upiId || ''})`
+        : method;
+      const tx = WalletService.withdraw(req.user, amount, methodStr);
       return res.json({ success: true, user: req.user, transaction: tx });
     } catch (err) {
       return res.status(400).json({ error: err.message });

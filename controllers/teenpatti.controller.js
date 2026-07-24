@@ -135,14 +135,31 @@ export class TeenPattiController {
 
   static async getMatchHistory(req, res) {
     try {
-      const userId = req.user._id;
-      const history = await TeenPattiMatchModel.find({
+      const userId = req.user._id.toString();
+      const historyDB = await TeenPattiMatchModel.find({
         $or: [
           { "players.A.userId": userId },
           { "players.B.userId": userId }
         ]
       }).sort({ createdAt: -1 }).lean();
       
+      const history = historyDB.map(match => {
+        const isWinner = match.winnerId && match.winnerId.toString() === userId;
+        const isDraw = !match.winnerId && match.status === 'FINISHED';
+        let result = isWinner ? 'WIN' : 'LOSS';
+        if (isDraw) result = 'DRAW';
+
+        return {
+          id: match._id.toString(),
+          gameType: 'TEEN PATTI',
+          variant: match.variant,
+          createdAt: match.createdAt,
+          entryFee: match.entryFee,
+          prizeAmount: isWinner ? match.pot : 0,
+          result: result
+        };
+      });
+
       return res.json({ success: true, history });
     } catch (err) {
       return res.status(500).json({ success: false, error: err.message });

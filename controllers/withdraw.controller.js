@@ -1,165 +1,379 @@
-import { UserService } from '../services/user.service.js';
+// server/controllers/withdraw.controller.js
+import mongoose from "mongoose";
+import { WithdrawRequestModel } from "../models/withdrawRequest.model.js";
+import { UserModel } from "../models/user.model.js";
+import { TransactionModel } from "../models/transaction.model.js";
 
-export class UserController {
-  static async getProfile(req, res) {
+const MIN_WITHDRAW_AMOUNT = 200;
+
+export const WithdrawController = {
+  // User creates a withdraw request
+  async createRequest(req, res) {
     try {
-      const profile = UserService.getProfile(req.user);
+      const userId = req.user._id;
+      const {
+        method,
+        amount,
+        accountHolderName,
+        upiId,
+        accountNumber,
+        confirmAccountNumber,
+        ifscCode,
+        bankName
+      } = req.body;
 
-      // Keep it strictly reading from db state!
-      const dbWinnings = profile.winningsBalance ?? 0;
-      const dbDeposit = profile.depositBalance ?? 0;
-      
-      profile.winningsBalance = dbWinnings;
-      profile.walletBalance = dbDeposit + dbWinnings;
+      const numericAmount = Number(amount);
+      if (isNaN(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({ success: false, message: "Invalid amount value." });
+      }
 
-      return res.json(profile);
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  static async updateProfile(req, res) {
-    const { username, avatar } = req.body;
-    try {
-      const updatedUser = await UserService.updateProfile(req.user, username, avatar);
-      return res.json({ success: true, user: updatedUser });
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
-    }
-  }
-
-  static async getLeaderboard(req, res) {
-    try {
-      const { UserModel } = await import('../models/user.model.js');
-      const users = await UserModel.find({ status: 'active', earnings: { $gte: 1000 } })
-        .sort({ earnings: -1, wins: -1 })
-        .limit(20)
-        .select('_id username avatar earnings wins gamesPlayed');
-      
-      const leaderboard = users.map(u => ({
-        id: u._id.toString(),
-        username: u.username,
-        avatar: u.avatar,
-        earnings: u.earnings || 0,
-        wins: u.wins || 0,
-        gamesPlayed: u.gamesPlayed || 0
-      }));
-
-      return res.json({ success: true, leaderboard });
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  static getSupportMessages(req, res) {
-    try {
-      const messages = UserService.getSupportMessages();
-      return res.json(messages);
-    } catch (err) {
-      return res.status(500).json({ error: err.message });
-    }
-  }
-
-  static addSupportMessage(req, res) {
-    const { text } = req.body;
-    try {
-      const messages = UserService.addSupportMessage(req.user, text);
-      return res.json({ success: true, messages });
-    } catch (err) {
-      return res.status(400).json({ error: err.message });
-    }
-  }
-
-  static async getMatchHistory(req, res) {
-    try {
-      const { TeenPattiMatchModel } = await import('../models/teenpattiMatch.model.js');
-      const { LudoMatchModel } = await import('../models/ludoMatch.model.js');
-      const userId = req.user._id.toString();
-
-      const tpHistoryDB = await TeenPattiMatchModel.find({
-        $or: [
-          { "players.A.userId": userId },
-          { "players.B.userId": userId }
-        ]
-      }).lean();
-
-      const ludoHistoryDB = await LudoMatchModel.find({
-        $or: [
-          { "players.red.userId": userId },
-          { "players.yellow.userId": userId }
-        ]
-      }).lean();
-
-      const combinedHistory = [];
-
-      for (const match of tpHistoryDB) {
-        const isWinner = match.winnerId && match.winnerId.toString() === userId;
-        const isDraw = !match.winnerId && match.status === 'FINISHED';
-        let result = isWinner ? 'WIN' : 'LOSS';
-        if (isDraw) result = 'DRAW';
-        combinedHistory.push({
-          id: match._id.toString(),
-          gameType: 'TEEN PATTI',
-          variant: match.variant,
-          createdAt: match.createdAt,
-          entryFee: match.entryFee,
-          prizeAmount: isWinner ? match.pot : 0,
-          result: result
+      if (numericAmount < MIN_WITHDRAW_AMOUNT) {
+        return res.status(400).json({
+          success: false,
+          message: `Amount must be greater than or equal to minimum withdrawal of ₹${MIN_WITHDRAW_AMOUNT}.`
         });
       }
 
-      for (const match of ludoHistoryDB) {
-        const isWinner = match.winnerId && match.winnerId.toString() === userId;
-        const isDraw = !match.winnerId && match.status === 'FINISHED';
-        let result = isWinner ? 'WIN' : 'LOSS';
-        if (isDraw) result = 'DRAW';
-        combinedHistory.push({
-          id: match._id.toString(),
-          gameType: 'LUDO',
-          variant: match.variant,
-          createdAt: match.createdAt,
-          entryFee: match.entryFee,
-          prizeAmount: isWinner ? match.winningPrize : 0,
-          result: result
+      // Check user's winnings balance
+      const user = await UserModel.findById(userId);
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User profile not found." });
+      }
+
+      if (numericAmount > (user.winningsBalance || 0)) {
+        return res.status(400).json({
+          success: false,
+          message: `Amount cannot exceed your withdrawable winnings balance of ₹${(user.winningsBalance || 0).toFixed(2)}.`
         });
       }
 
-      // Sort by descending createdAt date
-      combinedHistory.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      if (!method || !["UPI", "BANK"].includes(method)) {
+        return res.status(400).json({ success: false, message: "Valid withdrawal method (UPI or BANK) is required." });
+      }
 
-      return res.json({ success: true, history: combinedHistory });
+      if (method === "BANK") {
+        if (!accountHolderName || accountHolderName.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "Account Holder Name is required for Bank transfer." });
+        }
+      }
+
+      const requestPayload = {
+        userId,
+        username: user.username,
+        email: user.phoneNumber || "", // using phone number as backup or email if available
+        method,
+        amount: numericAmount
+      };
+      
+      if (method === "BANK") {
+         requestPayload.accountHolderName = accountHolderName.trim();
+      }
+
+      if (method === "UPI") {
+        if (!upiId || upiId.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "UPI ID is required." });
+        }
+        requestPayload.upiId = upiId.trim();
+      } else {
+        // Bank transfer details validation
+        if (!accountNumber || accountNumber.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "Account Number is required." });
+        }
+        if (accountNumber !== confirmAccountNumber) {
+          return res.status(400).json({ success: false, message: "Account Number and Confirm Account Number do not match." });
+        }
+        if (!ifscCode || ifscCode.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "IFSC Code is required." });
+        }
+
+        // IFSC validation (standard Indian banking regex: 4 chars, 0, 6 alpha/numeric)
+        const ifscRegex = /^[A-Z]{4}0[A-Z0-9]{6}$/;
+        if (!ifscRegex.test(ifscCode.toUpperCase().trim())) {
+          return res.status(400).json({ success: false, message: "Invalid IFSC Code format. E.g. SBIN0001234" });
+        }
+
+        if (!bankName || bankName.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "Bank Name is required." });
+        }
+
+        requestPayload.accountNumber = accountNumber.trim();
+        requestPayload.ifscCode = ifscCode.toUpperCase().trim();
+        requestPayload.bankName = bankName.trim();
+      }
+
+      const withdrawRequest = await WithdrawRequestModel.create(requestPayload);
+
+      const txMethod = withdrawRequest.method === "UPI" 
+        ? `UPI (${withdrawRequest.upiId})` 
+        : `Bank (${withdrawRequest.bankName} - ...${withdrawRequest.accountNumber?.slice(-4)})`;
+
+      await TransactionModel.create({
+        transactionId: `WTH-${withdrawRequest._id.toString()}`,
+        user: user._id,
+        type: "WITHDRAW",
+        amount: numericAmount,
+        status: "PENDING",
+        method: txMethod
+      });
+
+      // Physically deduct the amount from winnings immediately
+      user.winningsBalance = Math.max(0, (user.winningsBalance || 0) - numericAmount);
+      user.walletBalance = (user.depositBalance || 0) + user.winningsBalance;
+
+      // Add a PENDING notification inside user document
+      const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
+      user.notifications.push({
+        id: notifId,
+        message: `Your withdrawal request of ₹${numericAmount} has been submitted and is PENDING approval.`,
+        read: false,
+        createdAt: new Date()
+      });
+      await user.save();
+
+      // Emit live updates to `/ludo` namespace user room
+      if (global.ludoNamespace) {
+        const userRoom = user._id.toString();
+        
+        global.ludoNamespace.to(userRoom).emit("walletUpdated", {
+          depositBalance: user.depositBalance || 0,
+          winningsBalance: user.winningsBalance || 0,
+          walletBalance: user.walletBalance || 0
+        });
+      }
+
+      return res.status(201).json({ success: true, withdrawRequest });
     } catch (err) {
-      return res.status(500).json({ success: false, error: err.message });
+      console.error("CREATE_WITHDRAW_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
     }
-  }
+  },
 
-  static async getMyReferrals(req, res) {
+  // User gets withdrawal history
+  async getHistory(req, res) {
     try {
-      const { UserModel } = await import('../models/user.model.js');
-      const userId = req.user._id.toString();
+      const userId = req.user._id;
+      const history = await WithdrawRequestModel.find({ userId })
+        .sort({ createdAt: -1 });
 
-      // Find all users who were referred by the current user
-      const referrals = await UserModel.find({ referredBy: userId })
-        .select('_id username avatar createdAt')
-        .sort({ createdAt: -1 })
-        .lean();
+      return res.json({ success: true, withdraws: history });
+    } catch (err) {
+      console.error("GET_WITHDRAW_HISTORY_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  },
 
-      // Get the current user's total earnings
-      const user = await UserModel.findById(userId).select('referralEarnings referralCount').lean();
+  // Admin lists all requests with searching, filtering, and pagination
+  async adminList(req, res) {
+    try {
+      const { search, status, sortBy = "-createdAt", page = 1, limit = 10 } = req.query;
+
+      const query = {};
+
+      if (status && status !== "ALL") {
+        query.status = status;
+      }
+
+      if (search && search.trim().length > 0) {
+        query.username = { $regex: search.trim(), $options: "i" };
+      }
+
+      const pageNum = Math.max(1, parseInt(page));
+      const limitNum = Math.max(1, parseInt(limit));
+      const skip = (pageNum - 1) * limitNum;
+
+      const sortOption = {};
+      if (sortBy.startsWith("-")) {
+        sortOption[sortBy.substring(1)] = -1;
+      } else {
+        sortOption[sortBy] = 1;
+      }
+
+      const totalRequests = await WithdrawRequestModel.countDocuments(query);
+      const requests = await WithdrawRequestModel.find(query)
+        .sort(sortOption)
+        .skip(skip)
+        .limit(limitNum)
+        .populate("userId", "username phoneNumber");
 
       return res.json({
         success: true,
-        totalEarnings: user?.referralEarnings || 0,
-        referralCount: user?.referralCount || 0,
-        referrals: referrals.map(r => ({
-          id: r._id.toString(),
-          username: r.username,
-          avatar: r.avatar,
-          joinedAt: r.createdAt
-        }))
+        withdraws: requests,
+        pagination: {
+          total: totalRequests,
+          page: pageNum,
+          limit: limitNum,
+          pages: Math.ceil(totalRequests / limitNum)
+        }
       });
     } catch (err) {
-      return res.status(500).json({ success: false, error: err.message });
+      console.error("ADMIN_LIST_WITHDRAW_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  },
+
+  // Admin gets specific withdraw details
+  async adminGetDetails(req, res) {
+    try {
+      const { id } = req.params;
+      const request = await WithdrawRequestModel.findById(id)
+        .populate("userId", "username phoneNumber walletBalance winningsBalance depositBalance");
+
+      if (!request) {
+        return res.status(404).json({ success: false, message: "Withdraw request not found." });
+      }
+
+      return res.json({ success: true, withdraw: request });
+    } catch (err) {
+      console.error("ADMIN_GET_WITHDRAW_DETAIL_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  },
+
+  // Admin approves a withdraw request
+  async adminApprove(req, res) {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    try {
+      const { id } = req.params;
+      const withdraw = await WithdrawRequestModel.findById(id).session(session);
+      if (!withdraw) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ success: false, message: "Withdraw request not found." });
+      }
+
+      if (withdraw.status !== "PENDING") {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(400).json({ success: false, message: "This request has already been processed." });
+      }
+
+      const user = await UserModel.findById(withdraw.userId).session(session);
+      if (!user) {
+        await session.abortTransaction();
+        session.endSession();
+        return res.status(404).json({ success: false, message: "User associated with this request not found." });
+      }
+
+      // Amount was ALREADY physically deducted upon creation, so NO NEED to deduct here again!
+
+      const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
+      user.notifications.push({
+        id: notifId,
+        message: `Your withdrawal request of ₹${withdraw.amount} has been APPROVED!`,
+        read: false,
+        createdAt: new Date()
+      });
+      await user.save({ session });
+
+      withdraw.status = "APPROVED";
+      withdraw.approvedBy = req.user.email || "admin";
+      withdraw.approvedAt = new Date();
+      await withdraw.save({ session });
+
+      // Update existing transaction log
+      await TransactionModel.findOneAndUpdate(
+        { transactionId: `WTH-${withdraw._id.toString()}` },
+        { status: "SUCCESS" },
+        { session }
+      );
+
+      await session.commitTransaction();
+      session.endSession();
+
+      // Emit live updates to `/ludo` namespace user room
+      if (global.ludoNamespace) {
+        const userRoom = user._id.toString();
+
+        global.ludoNamespace.to(userRoom).emit("walletUpdated", {
+          depositBalance: user.depositBalance || 0,
+          winningsBalance: user.winningsBalance || 0,
+          walletBalance: user.walletBalance || 0
+        });
+
+        global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
+          type: "APPROVED",
+          message: `Your withdrawal request of ₹${withdraw.amount} has been APPROVED.`
+        });
+      }
+
+      return res.json({ success: true, withdraw });
+    } catch (err) {
+      await session.abortTransaction();
+      session.endSession();
+      console.error("ADMIN_APPROVE_WITHDRAW_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
+    }
+  },
+
+  // Admin rejects a withdraw request with remarks
+  async adminReject(req, res) {
+    try {
+      const { id } = req.params;
+      const { remarks } = req.body;
+
+      if (!remarks || remarks.trim().length === 0) {
+        return res.status(400).json({ success: false, message: "Please provide a reason/remarks for rejection." });
+      }
+
+      const withdraw = await WithdrawRequestModel.findById(id);
+      if (!withdraw) {
+        return res.status(404).json({ success: false, message: "Withdraw request not found." });
+      }
+
+      if (withdraw.status !== "PENDING") {
+        return res.status(400).json({ success: false, message: "This request has already been processed." });
+      }
+
+      withdraw.status = "REJECTED";
+      withdraw.remarks = remarks.trim();
+      withdraw.approvedBy = req.user.email || "admin";
+      withdraw.approvedAt = new Date();
+      await withdraw.save();
+
+      const user = await UserModel.findById(withdraw.userId);
+      if (user) {
+        // Refund the amount since it was physically deducted on request creation
+        user.winningsBalance = (user.winningsBalance || 0) + withdraw.amount;
+        user.walletBalance = (user.depositBalance || 0) + user.winningsBalance;
+
+        const notifId = "NOTIF" + Date.now() + Math.floor(Math.random() * 1000);
+        user.notifications.push({
+          id: notifId,
+          message: `Your withdrawal request of ₹${withdraw.amount} was REJECTED. Reason: ${remarks}`,
+          read: false,
+          createdAt: new Date()
+        });
+        await user.save();
+
+        // Emit live update to client
+        if (global.ludoNamespace) {
+          const userRoom = user._id.toString();
+          
+          global.ludoNamespace.to(userRoom).emit("walletUpdated", {
+            depositBalance: user.depositBalance || 0,
+            winningsBalance: user.winningsBalance || 0,
+            walletBalance: user.walletBalance || 0
+          });
+
+          global.ludoNamespace.to(userRoom).emit("withdrawNotification", {
+            type: "REJECTED",
+            message: `Your withdrawal request of ₹${withdraw.amount} has been REJECTED. Reason: ${remarks}`
+          });
+        }
+      }
+
+      // Update existing transaction log
+      await TransactionModel.findOneAndUpdate(
+        { transactionId: `WTH-${withdraw._id.toString()}` },
+        { status: "REJECTED" }
+      );
+
+      return res.json({ success: true, withdraw });
+    } catch (err) {
+      console.error("ADMIN_REJECT_WITHDRAW_ERROR", err);
+      return res.status(500).json({ success: false, message: err.message });
     }
   }
-}
+};
+

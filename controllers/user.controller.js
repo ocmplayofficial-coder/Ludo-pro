@@ -132,4 +132,34 @@ export class UserController {
       return res.status(500).json({ success: false, error: err.message });
     }
   }
+
+  static async getMyReferrals(req, res) {
+    try {
+      const { UserModel } = await import('../models/user.model.js');
+      const userId = req.user._id.toString();
+
+      // Find all users who were referred by the current user
+      const referrals = await UserModel.find({ referredBy: userId })
+        .select('_id username avatar createdAt')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // Get the current user's total earnings
+      const user = await UserModel.findById(userId).select('referralEarnings referralCount').lean();
+
+      return res.json({
+        success: true,
+        totalEarnings: user?.referralEarnings || 0,
+        referralCount: user?.referralCount || 0,
+        referrals: referrals.map(r => ({
+          id: r._id.toString(),
+          username: r.username,
+          avatar: r.avatar,
+          joinedAt: r.createdAt
+        }))
+      });
+    } catch (err) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
 }

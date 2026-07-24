@@ -27,6 +27,10 @@ const ArenaSchema = new mongoose.Schema({
     type: Boolean,
     default: true
   },
+  bgImage: {
+    type: String,
+    default: ""
+  },
   createdAt: {
     type: Date,
     default: Date.now

@@ -369,11 +369,18 @@ export class LudoService {
         const game = opponentItem.game;
 
         // Assign joiner as yellow
+        let yellowPrefColor = user.preferredColor || 'yellow';
+        // Conflict resolution: if opponent wants the same color, fallback to yellow (or red if yellow is taken)
+        if (yellowPrefColor === game.players.red.preferredColor) {
+          yellowPrefColor = yellowPrefColor === 'yellow' ? 'red' : 'yellow';
+        }
+
         game.players.yellow = {
           userId: user._id,
           username: user.username,
           avatar: user.avatar,
-          color: 'yellow'
+          color: 'yellow',
+          preferredColor: yellowPrefColor
         };
         game.status = 'PLAYING_PENDING';
 

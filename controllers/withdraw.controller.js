@@ -51,8 +51,10 @@ export const WithdrawController = {
         return res.status(400).json({ success: false, message: "Valid withdrawal method (UPI or BANK) is required." });
       }
 
-      if (!accountHolderName || accountHolderName.trim().length === 0) {
-        return res.status(400).json({ success: false, message: "Account Holder Name is required." });
+      if (method === "BANK") {
+        if (!accountHolderName || accountHolderName.trim().length === 0) {
+          return res.status(400).json({ success: false, message: "Account Holder Name is required for Bank transfer." });
+        }
       }
 
       const requestPayload = {
@@ -60,9 +62,12 @@ export const WithdrawController = {
         username: user.username,
         email: user.phoneNumber || "", // using phone number as backup or email if available
         method,
-        amount: numericAmount,
-        accountHolderName: accountHolderName.trim()
+        amount: numericAmount
       };
+      
+      if (method === "BANK") {
+         requestPayload.accountHolderName = accountHolderName.trim();
+      }
 
       if (method === "UPI") {
         if (!upiId || upiId.trim().length === 0) {

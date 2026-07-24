@@ -207,7 +207,8 @@ export class AdminController {
         gameType,
         mode,
         entryFee,
-        winningPrize
+        winningPrize,
+        bgImage
       } = req.body;
 
       if (
@@ -229,6 +230,7 @@ export class AdminController {
         entryFee: Number(entryFee),
         winningPrize: Number(winningPrize),
         active: true,
+        bgImage: bgImage || "",
         createdAt: new Date()
       };
 

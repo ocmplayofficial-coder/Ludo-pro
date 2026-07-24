@@ -4,6 +4,7 @@ import { LudoController } from '../controllers/ludo.controller.js';
 
 const router = express.Router();
 
+router.get("/status", authMiddleware, LudoController.getArenaStatus);
 router.post("/matchmaking", authMiddleware, LudoController.matchmaking);
 router.post("/matchmaking/cancel", authMiddleware, LudoController.matchmakingCancel);
 router.get("/:id", authMiddleware, LudoController.getGame);

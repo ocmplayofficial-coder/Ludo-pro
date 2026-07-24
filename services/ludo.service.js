@@ -309,6 +309,32 @@ export class LudoService {
         console.warn('[MM] Failed to record matchmaking transaction', err);
       }
 
+      // 3. Process Referral Commission (2% of entry fee)
+      if (user.referredBy && fee > 0) {
+        try {
+          const commission = parseFloat((fee * 0.02).toFixed(2));
+          if (commission > 0) {
+            const referrer = await UserModel.findById(user.referredBy);
+            if (referrer) {
+              referrer.winningsBalance = (referrer.winningsBalance || 0) + commission;
+              referrer.walletBalance = (referrer.walletBalance || 0) + commission;
+              referrer.referralEarnings = (referrer.referralEarnings || 0) + commission;
+              await referrer.save();
+
+              const { addTransaction } = await import('../wallet/transaction.service.js');
+              addTransaction({
+                type: 'REFERRAL_COMMISSION',
+                amount: commission,
+                status: 'SUCCESS',
+                method: `Commission from ${user.username}'s Gameplay`
+              }, referrer);
+            }
+          }
+        } catch (err) {
+          console.warn('[MM] Failed to process referral commission', err);
+        }
+      }
+
       // Always read fresh from the Map inside the lock
       const queue = global.__matchmakingQueue.get(queueKey) || [];
 

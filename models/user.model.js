@@ -10,6 +10,7 @@ const userSchema = new mongoose.Schema(
     },
     nickname: { type: String, required: true },
     avatar: { type: String, required: true },
+    preferredColor: { type: String, enum: ['red', 'blue', 'green', 'yellow'], default: 'red' },
     referralCode: { type: String, default: () => Math.random().toString(36).substring(2, 8).toUpperCase() },
     // wallet related fields (can be moved to a separate Wallet model later)
     walletBalance: { type: Number, default: 0 },

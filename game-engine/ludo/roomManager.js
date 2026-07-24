@@ -61,7 +61,7 @@ export function createLudoRoom(user, variant, entryFee) {
     diceHasRolled: false,
     tokens,
     winner: null,
-    movesRemaining: variant === 'TURN' ? 25 : 999,
+    movesRemaining: variant === 'TURN' ? 50 : 999,
     timerRemaining: variant === 'TIME' ? 300 : 9999,
     redLives: 3,
     yellowLives: 3,

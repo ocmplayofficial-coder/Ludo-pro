@@ -5,7 +5,7 @@ export class UserService {
     return user;
   }
 
-  static async updateProfile(user, username, avatar) {
+  static async updateProfile(user, username, avatar, preferredColor) {
     let changed = false;
     
     if (username && username.trim() !== "") {
@@ -18,6 +18,11 @@ export class UserService {
     
     if (avatar && avatar.trim() !== "") {
       user.avatar = avatar.trim();
+      changed = true;
+    }
+    
+    if (preferredColor && ['red', 'blue', 'green', 'yellow'].includes(preferredColor)) {
+      user.preferredColor = preferredColor;
       changed = true;
     }
     

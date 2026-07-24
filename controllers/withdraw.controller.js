@@ -4,7 +4,7 @@ import { WithdrawRequestModel } from "../models/withdrawRequest.model.js";
 import { UserModel } from "../models/user.model.js";
 import { TransactionModel } from "../models/transaction.model.js";
 
-const MIN_WITHDRAW_AMOUNT = 100;
+const MIN_WITHDRAW_AMOUNT = 200;
 
 export const WithdrawController = {
   // User creates a withdraw request

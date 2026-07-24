@@ -31,7 +31,7 @@ export class UserController {
   static async getLeaderboard(req, res) {
     try {
       const { UserModel } = await import('../models/user.model.js');
-      const users = await UserModel.find({ status: 'active' })
+      const users = await UserModel.find({ status: 'active', earnings: { $gte: 1000 } })
         .sort({ earnings: -1, wins: -1 })
         .limit(20)
         .select('_id username avatar earnings wins gamesPlayed');

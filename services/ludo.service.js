@@ -10,6 +10,7 @@ import { evaluateWinnerByScore, calculateScores, calculatePlayerScore } from '..
 import { getLudoCommonTrackCell } from '../game-engine/ludo/pathEngine.js';
 import { SAFE_CELLS } from '../game-engine/ludo/safeZoneEngine.js';
 import { UserModel } from '../models/user.model.js';
+import { LudoMatchModel } from '../models/ludoMatch.model.js';
 import { db } from '../config/db.js';
 import { StatsService } from './stats.service.js';
 import { ArenaStatusManager } from '../game-engine/ludo/ArenaStatusManager.js';
@@ -101,6 +102,43 @@ async function finishGameAndAward(game, winnerColor) {
 
     const redUser = await UserModel.findById(redPlayerId);
     const yellowUser = yellowPlayerId ? await UserModel.findById(yellowPlayerId) : null;
+
+    let winnerId = null;
+    if (winnerColor === 'red' && redUser) winnerId = redUser._id;
+    if (winnerColor === 'yellow' && yellowUser) winnerId = yellowUser._id;
+
+    try {
+      if (yellowPlayerId) { // Only save if there's actually a second player
+        await LudoMatchModel.create({
+          matchId: game.matchId,
+          variant: game.variant,
+          entryFee: game.entryFee,
+          winningPrize: game.winningPrize,
+          players: {
+            red: {
+              userId: redPlayerId,
+              username: game.players.red.username,
+              avatar: game.players.red.avatar,
+              color: 'red',
+              score: game.scores?.red || 0
+            },
+            yellow: {
+              userId: yellowPlayerId,
+              username: game.players.yellow.username,
+              avatar: game.players.yellow.avatar,
+              color: 'yellow',
+              score: game.scores?.yellow || 0
+            }
+          },
+          winnerId,
+          winnerColor,
+          status: 'FINISHED'
+        });
+        console.log('Saved LudoMatch to DB', game.matchId);
+      }
+    } catch (dbErr) {
+      console.error('Failed to save LudoMatch to DB', dbErr);
+    }
 
     if (winnerColor === 'red') {
       if (redUser) {
@@ -509,8 +547,11 @@ export class LudoService {
     console.log('SCORE_UPDATED', game.scores);
 
     // Home scoring log (scores are authoritative from token progress)
-    if (tok.position === 57 && tok.prevPosition < 57) {
+    const reachedHome = (tok.position === 57 && tok.prevPosition < 57);
+    if (reachedHome) {
       game.logs.unshift(`🏠 Home! ${tok.color === 'red' ? 'You' : 'Opponent'} reached the home center!`);
+      if (!game.bonusScore) game.bonusScore = { red: 0, yellow: 0 };
+      game.bonusScore[tok.color] = (game.bonusScore[tok.color] || 0) + 56;
     }
 
     const captured = evaluateCaptures(game, tok);
@@ -528,7 +569,7 @@ export class LudoService {
       return game;
     }
 
-    switchTurn(game, roll, captured);
+    switchTurn(game, roll, captured, reachedHome);
 
     // Ensure dice flags are reset for the next player (defensive - switchTurn should handle this)
     try {
@@ -581,6 +622,7 @@ export class LudoService {
     game.diceHasRolled = false;
     game.diceRoll = null;
     game.turn = game.turn === 'red' ? 'yellow' : 'red';
+    game.turnTimerRemaining = 18;
 
     if (game.variant === 'TURN') {
       game.movesRemaining -= 1;

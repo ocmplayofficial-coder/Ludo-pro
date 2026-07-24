@@ -1,13 +1,15 @@
 export function calculatePlayerScore(game, color) {
   if (!game || !game.tokens) return 0;
-  return game.tokens
+  const boardScore = game.tokens
     .filter(t => t.color === color)
     .reduce((sum, t) => sum + (t.position === -1 ? 0 : t.position), 0);
+  const bonus = game.bonusScore ? (game.bonusScore[color] || 0) : 0;
+  return boardScore + bonus;
 }
 
-export function calculateScores(tokens) {
-  const redProgress = tokens.filter(t => t.color === 'red').reduce((acc, t) => acc + (t.position === -1 ? 0 : t.position), 0);
-  const yellowProgress = tokens.filter(t => t.color === 'yellow').reduce((acc, t) => acc + (t.position === -1 ? 0 : t.position), 0);
+export function calculateScores(game) {
+  const redProgress = calculatePlayerScore(game, 'red');
+  const yellowProgress = calculatePlayerScore(game, 'yellow');
   return { redProgress, yellowProgress };
 }
 

@@ -52,7 +52,7 @@ export function createLudoRoom(user, variant, entryFee) {
     entryFee: fee,
     winningPrize,
     players: {
-      red: { userId: user._id, username: user.username, avatar: user.avatar },
+      red: { userId: user._id, username: user.username, avatar: user.avatar, preferredColor: user.preferredColor || 'red' },
       yellow: null // filled when opponent joins
     },
     scores: { red: 0, yellow: 0 },

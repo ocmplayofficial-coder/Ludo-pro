@@ -19,7 +19,8 @@ export async function claimReferralBonus(user, code) {
   const updatedUser = await UserModel.findOneAndUpdate(
     { _id: user._id, referralRewardGiven: { $ne: true } },
     { 
-      $set: { referralRewardGiven: true, rewardProcessedAt: new Date(), referredBy: referrer._id }
+      $set: { referralRewardGiven: true, rewardProcessedAt: new Date(), referredBy: referrer._id },
+      $inc: { depositBalance: 50, walletBalance: 50 } // Give new user 50rs deposit balance
     },
     { new: true }
   );
@@ -29,10 +30,10 @@ export async function claimReferralBonus(user, code) {
     return null;
   }
 
-  // Increment referrer's count and give 30 rs bonus
+  // Increment referrer's count (financial commission handled during gameplay)
   const updatedReferrer = await UserModel.findOneAndUpdate(
      { _id: referrer._id },
-     { $inc: { referralCount: 1, depositBalance: 30, walletBalance: 30 } },
+     { $inc: { referralCount: 1 } },
      { new: true }
   );
 
@@ -42,13 +43,13 @@ export async function claimReferralBonus(user, code) {
   user.referredBy = updatedUser.referredBy;
 
   let tx = null;
-  if (updatedReferrer) {
+  if (updatedUser) {
     tx = await addTransaction({
       type: "BONUS",
-      amount: 30.00,
+      amount: 50.00,
       status: "SUCCESS",
-      method: `Referral Invite Bonus (${user.phoneNumber || 'New User'})`
-    }, updatedReferrer);
+      method: `Welcome Bonus (Referred by ${referrer.username})`
+    }, updatedUser);
   }
 
   return tx;

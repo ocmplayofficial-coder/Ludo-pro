@@ -10,5 +10,6 @@ router.get("/leaderboard", authMiddleware, UserController.getLeaderboard);
 router.get("/support/messages", authMiddleware, UserController.getSupportMessages);
 router.post("/support/messages", authMiddleware, UserController.addSupportMessage);
 router.get("/match-history", authMiddleware, UserController.getMatchHistory);
+router.get("/referrals", authMiddleware, UserController.getMyReferrals);
 
 export default router;

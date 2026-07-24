@@ -1,4 +1,5 @@
 import { LudoService } from '../services/ludo.service.js';
+import { ArenaStatusManager } from '../game-engine/ludo/ArenaStatusManager.js';
 
 export class LudoController {
   static async matchmaking(req, res) {
@@ -9,6 +10,14 @@ export class LudoController {
       return res.json({ success: true, game });
     } catch (err) {
       return res.status(400).json({ error: err.message });
+    }
+  }
+
+  static getArenaStatus(req, res) {
+    try {
+      return res.json({ success: true, state: ArenaStatusManager.state });
+    } catch (err) {
+      return res.status(500).json({ error: err.message });
     }
   }
 
